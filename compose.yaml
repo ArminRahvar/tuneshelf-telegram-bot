@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: playlist_bot
+      POSTGRES_USER: playlist_bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment or .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U playlist_bot -d playlist_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  playlist-bot:
+    build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in your environment or .env}
+      DATABASE_URL: postgresql://playlist_bot:${POSTGRES_PASSWORD}@postgres:5432/playlist_bot
+      MUSICBRAINZ_CONTACT_EMAIL: ${MUSICBRAINZ_CONTACT_EMAIL:-}
+
+volumes:
+  postgres-data:
