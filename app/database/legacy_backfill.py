@@ -480,6 +480,8 @@ def _ensure_annotation(
     track_id: int,
     column_name: str,
     value: Any,
+    *,
+    preserve_existing: bool = False,
 ) -> None:
     if value is None:
         return
@@ -498,7 +500,7 @@ def _ensure_annotation(
                 **{column_name: value},
             )
         )
-    elif current != value:
+    elif current != value and not preserve_existing:
         raise ValueError(
             f"Target annotation conflicts for owner {user_id}, track {track_id}."
         )
@@ -562,11 +564,31 @@ def _import_track(
     user_id: int,
     references: list[dict[str, Any]],
     tag_ids: list[int],
+    *,
+    merge_existing: bool = False,
 ) -> int:
     legacy_id = int(row["id"])
     mapped_id = _mapped_id(connection, source_key, "track", legacy_id)
     if mapped_id is not None:
         return mapped_id
+    if merge_existing:
+        existing_track_id = _find_existing_legacy_track(
+            connection,
+            user_id,
+            row,
+        )
+        if existing_track_id is not None:
+            _merge_legacy_track_data(
+                connection,
+                source_key,
+                legacy_id,
+                row,
+                user_id,
+                existing_track_id,
+                references,
+                tag_ids,
+            )
+            return existing_track_id
 
     album_id = None
     release_title = _value(row, "release_title")
@@ -662,6 +684,150 @@ def _import_track(
     return track_id
 
 
+def _find_existing_legacy_track(
+    connection: Connection,
+    user_id: int,
+    row: dict[str, Any],
+) -> int | None:
+    reference_track_id = connection.execute(
+        select(TelegramSourceReference.track_id).where(
+            TelegramSourceReference.user_id == user_id,
+            TelegramSourceReference.source_chat_id
+            == int(row["source_chat_id"]),
+            TelegramSourceReference.source_message_id
+            == int(row["source_message_id"]),
+        )
+    ).scalar_one_or_none()
+    if reference_track_id is not None:
+        return int(reference_track_id)
+
+    file_unique_id = _value(row, "file_unique_id")
+    if file_unique_id:
+        matching_track_ids = connection.execute(
+            select(TelegramSourceReference.track_id)
+            .where(
+                TelegramSourceReference.user_id == user_id,
+                TelegramSourceReference.telegram_file_unique_id == file_unique_id,
+            )
+            .distinct()
+        ).scalars().all()
+        if len(matching_track_ids) == 1:
+            return int(matching_track_ids[0])
+
+    recording_id = _value(row, "musicbrainz_recording_id")
+    if recording_id:
+        matching_track_ids = connection.execute(
+            select(CatalogTrack.id)
+            .join(LibraryEntry, LibraryEntry.track_id == CatalogTrack.id)
+            .where(
+                LibraryEntry.user_id == user_id,
+                CatalogTrack.musicbrainz_recording_id == recording_id,
+            )
+            .distinct()
+        ).scalars().all()
+        if len(matching_track_ids) == 1:
+            return int(matching_track_ids[0])
+    return None
+
+
+def _merge_legacy_track_data(
+    connection: Connection,
+    source_key: str,
+    legacy_id: int,
+    row: dict[str, Any],
+    user_id: int,
+    target_track_id: int,
+    references: list[dict[str, Any]],
+    tag_ids: list[int],
+) -> None:
+    library_entry = connection.execute(
+        select(LibraryEntry.track_id).where(
+            LibraryEntry.user_id == user_id,
+            LibraryEntry.track_id == target_track_id,
+        )
+    ).first()
+    if library_entry is None:
+        connection.execute(
+            LibraryEntry.__table__.insert().values(
+                user_id=user_id,
+                track_id=target_track_id,
+                added_at=_datetime(_value(row, "added_at")),
+            )
+        )
+
+    _ensure_annotation(
+        connection,
+        UserTrackRating.__table__,
+        user_id,
+        target_track_id,
+        "rating",
+        int(row["rating"]) if _value(row, "rating") is not None else None,
+        preserve_existing=True,
+    )
+    _ensure_annotation(
+        connection,
+        UserTrackNote.__table__,
+        user_id,
+        target_track_id,
+        "note",
+        _value(row, "note"),
+        preserve_existing=True,
+    )
+
+    for reference in references:
+        existing_reference = connection.execute(
+            select(TelegramSourceReference.track_id).where(
+                TelegramSourceReference.user_id == user_id,
+                TelegramSourceReference.source_chat_id
+                == reference["source_chat_id"],
+                TelegramSourceReference.source_message_id
+                == reference["source_message_id"],
+            )
+        ).scalar_one_or_none()
+        if existing_reference is not None:
+            if int(existing_reference) != target_track_id:
+                raise ValueError(
+                    "A legacy Telegram source reference conflicts with existing "
+                    "normalized ownership."
+                )
+            continue
+        connection.execute(
+            TelegramSourceReference.__table__.insert().values(
+                user_id=user_id,
+                track_id=target_track_id,
+                telegram_file_id=reference["telegram_file_id"],
+                telegram_file_unique_id=reference["telegram_file_unique_id"],
+                source_chat_id=reference["source_chat_id"],
+                source_message_id=reference["source_message_id"],
+                media_type=reference["media_type"],
+                mime_type=reference["mime_type"],
+                original_filename=reference["original_filename"],
+                is_available=reference["is_available"],
+                created_at=_datetime(reference["created_at"]),
+                last_verified_at=_datetime(reference["last_verified_at"]),
+            )
+        )
+
+    for tag_id in tag_ids:
+        existing_tag = connection.execute(
+            select(UserTrackTag.track_id).where(
+                UserTrackTag.user_id == user_id,
+                UserTrackTag.track_id == target_track_id,
+                UserTrackTag.tag_id == tag_id,
+            )
+        ).first()
+        if existing_tag is None:
+            connection.execute(
+                UserTrackTag.__table__.insert().values(
+                    user_id=user_id,
+                    track_id=target_track_id,
+                    tag_id=tag_id,
+                )
+            )
+
+    _record_mapping(connection, source_key, "track", legacy_id, target_track_id)
+
+
 def _link_unambiguous_archive_assets(connection: Connection) -> None:
     candidates = (
         select(
@@ -693,6 +859,8 @@ def _import_snapshot(
     snapshot: LegacySnapshot,
     validated: dict[str, Any],
     fingerprint: str,
+    *,
+    merge_existing: bool = False,
 ) -> dict[str, int]:
     tables = snapshot.tables
     counts: defaultdict[str, int] = defaultdict(int)
@@ -714,6 +882,14 @@ def _import_snapshot(
         counts["users_checked"] += 1
 
     for row in tables.get("user_settings", []):
+        if merge_existing:
+            existing_preference = connection.execute(
+                select(UserPreference.user_id).where(
+                    UserPreference.user_id == int(row["user_id"])
+                )
+            ).first()
+            if existing_preference is not None:
+                continue
         _ensure_preference(connection, row)
         counts["preferences_imported"] += 1
 
@@ -747,17 +923,30 @@ def _import_snapshot(
         legacy_id = int(playlist["id"])
         mapped_id = _mapped_id(connection, source_key, "playlist", legacy_id)
         if mapped_id is None:
-            target_id = _insert_id(
-                connection,
-                UserPlaylist.__table__,
-                {
-                    "user_id": int(playlist["user_id"]),
-                    "name": str(playlist["name"]),
-                    "created_at": _datetime(_value(playlist, "created_at")),
-                },
-            )
+            target_id = None
+            if merge_existing:
+                target_id = connection.execute(
+                    select(UserPlaylist.id)
+                    .where(
+                        UserPlaylist.user_id == int(playlist["user_id"]),
+                        func.lower(UserPlaylist.name)
+                        == str(playlist["name"]).lower(),
+                    )
+                    .order_by(UserPlaylist.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            if target_id is None:
+                target_id = _insert_id(
+                    connection,
+                    UserPlaylist.__table__,
+                    {
+                        "user_id": int(playlist["user_id"]),
+                        "name": str(playlist["name"]),
+                        "created_at": _datetime(_value(playlist, "created_at")),
+                    },
+                )
+                counts["playlists_imported"] += 1
             _record_mapping(connection, source_key, "playlist", legacy_id, target_id)
-            counts["playlists_imported"] += 1
 
     tags_by_track: defaultdict[int, list[int]] = defaultdict(list)
     for association in tables.get("track_tags", []):
@@ -784,22 +973,61 @@ def _import_snapshot(
             user_id,
             _source_references(tables, track),
             tags_by_track[int(track["id"])],
+            merge_existing=merge_existing,
         )
         counts["tracks_imported"] += 1
-        connection.execute(
-            PlaylistItem.__table__.insert().values(
-                playlist_id=target_playlist_id,
-                track_id=target_track_id,
-                user_id=user_id,
-                position=track_playlist_positions[target_playlist_id],
-                added_at=_datetime(_value(track, "added_at")),
+        existing_item = None
+        if merge_existing:
+            existing_item = connection.execute(
+                select(PlaylistItem.track_id).where(
+                    PlaylistItem.playlist_id == target_playlist_id,
+                    PlaylistItem.track_id == target_track_id,
+                    PlaylistItem.user_id == user_id,
+                )
+            ).first()
+        if existing_item is None:
+            if merge_existing:
+                position = connection.execute(
+                    select(func.max(PlaylistItem.position)).where(
+                        PlaylistItem.playlist_id == target_playlist_id,
+                        PlaylistItem.user_id == user_id,
+                    )
+                ).scalar_one()
+                position = 0 if position is None else int(position) + 1
+            else:
+                position = track_playlist_positions[target_playlist_id]
+            connection.execute(
+                PlaylistItem.__table__.insert().values(
+                    playlist_id=target_playlist_id,
+                    track_id=target_track_id,
+                    user_id=user_id,
+                    position=position,
+                    added_at=_datetime(_value(track, "added_at")),
+                )
             )
-        )
-        track_playlist_positions[target_playlist_id] += 1
+            track_playlist_positions[target_playlist_id] += 1
 
     for row in tables.get("metadata_only_tracks", []):
         legacy_id = int(row["id"])
         target_id = _mapped_id(connection, source_key, "metadata_track", legacy_id)
+        if target_id is None and merge_existing:
+            target_id = _find_existing_metadata_track(connection, row)
+            if target_id is not None:
+                user_id = int(row["owner_user_id"])
+                existing_entry = connection.execute(
+                    select(LibraryEntry.track_id).where(
+                        LibraryEntry.user_id == user_id,
+                        LibraryEntry.track_id == target_id,
+                    )
+                ).first()
+                if existing_entry is None:
+                    connection.execute(
+                        LibraryEntry.__table__.insert().values(
+                            user_id=user_id,
+                            track_id=target_id,
+                            added_at=_datetime(_value(row, "created_at")),
+                        )
+                    )
         if target_id is None:
             album_id = None
             release_title = _value(row, "release_title")
@@ -848,24 +1076,53 @@ def _import_snapshot(
                     added_at=_datetime(_value(row, "created_at")),
                 )
             )
-            _record_mapping(
-                connection,
-                source_key,
-                "metadata_track",
-                legacy_id,
-                target_id,
-            )
             counts["metadata_tracks_imported"] += 1
+        _record_mapping(
+            connection,
+            source_key,
+            "metadata_track",
+            legacy_id,
+            int(target_id),
+        )
 
     _link_unambiguous_archive_assets(connection)
     return dict(counts)
+
+
+def _find_existing_metadata_track(
+    connection: Connection,
+    row: dict[str, Any],
+) -> int | None:
+    user_id = int(row["owner_user_id"])
+    recording_id = _value(row, "musicbrainz_recording_id")
+    provider_url = _value(row, "provider_url")
+    conditions = []
+    if recording_id:
+        conditions.append(CatalogTrack.musicbrainz_recording_id == recording_id)
+    if provider_url:
+        conditions.append(CatalogTrack.source_identifier == provider_url)
+    for condition in conditions:
+        matching_track_ids = connection.execute(
+            select(CatalogTrack.id)
+            .join(LibraryEntry, LibraryEntry.track_id == CatalogTrack.id)
+            .where(LibraryEntry.user_id == user_id, condition)
+            .distinct()
+        ).scalars().all()
+        if len(matching_track_ids) == 1:
+            return int(matching_track_ids[0])
+    return None
 
 
 def _verify_import(
     connection: Connection,
     source_key: str,
     snapshot: LegacySnapshot,
+    *,
+    merge_existing: bool = False,
 ) -> dict[str, int]:
+    if merge_existing:
+        return _verify_merged_import(connection, source_key, snapshot)
+
     tables = snapshot.tables
     expected = {
         "playlist": len(tables["playlists"]),
@@ -1002,12 +1259,141 @@ def _verify_import(
     return mapping_counts
 
 
+def _verify_merged_import(
+    connection: Connection,
+    source_key: str,
+    snapshot: LegacySnapshot,
+) -> dict[str, int]:
+    tables = snapshot.tables
+    expected_counts = {
+        "playlist": len(tables["playlists"]),
+        "track": len(tables["tracks"]),
+        "metadata_track": len(tables.get("metadata_only_tracks", [])),
+        "tag": len(tables.get("tags", [])),
+    }
+    mapping_counts: dict[str, int] = {}
+    mappings: dict[str, dict[int, int]] = {}
+    for entity_type, expected_count in expected_counts.items():
+        rows = connection.execute(
+            select(LegacyImportMap.legacy_id, LegacyImportMap.target_id).where(
+                LegacyImportMap.source_key == source_key,
+                LegacyImportMap.entity_type == entity_type,
+            )
+        ).all()
+        if len(rows) != expected_count:
+            raise RuntimeError(
+                f"Post-import verification failed for {entity_type} mappings."
+            )
+        mappings[entity_type] = {
+            int(legacy_id): int(target_id) for legacy_id, target_id in rows
+        }
+        mapping_counts[f"{entity_type}_mappings"] = len(rows)
+
+    playlists_by_id = {
+        int(row["id"]): row for row in tables["playlists"]
+    }
+    expected_library_entries: set[tuple[int, int]] = set()
+    expected_memberships: set[tuple[int, int, int]] = set()
+    expected_references: set[tuple[int, int, int, int]] = set()
+    for track in tables["tracks"]:
+        playlist = playlists_by_id[int(track["playlist_id"])]
+        user_id = int(playlist["user_id"])
+        track_id = mappings["track"][int(track["id"])]
+        playlist_id = mappings["playlist"][int(playlist["id"])]
+        if connection.execute(
+            select(LibraryEntry.track_id).where(
+                LibraryEntry.user_id == user_id,
+                LibraryEntry.track_id == track_id,
+            )
+        ).first() is None:
+            raise RuntimeError("Post-import verification failed for library entries.")
+        expected_library_entries.add((user_id, track_id))
+        if connection.execute(
+            select(PlaylistItem.track_id).where(
+                PlaylistItem.user_id == user_id,
+                PlaylistItem.playlist_id == playlist_id,
+                PlaylistItem.track_id == track_id,
+            )
+        ).first() is None:
+            raise RuntimeError("Post-import verification failed for playlist membership.")
+        expected_memberships.add((user_id, playlist_id, track_id))
+        for reference in _source_references(tables, track):
+            reference_key = (
+                user_id,
+                track_id,
+                reference["source_chat_id"],
+                reference["source_message_id"],
+            )
+            expected_references.add(reference_key)
+            if connection.execute(
+                select(TelegramSourceReference.id).where(
+                    TelegramSourceReference.user_id == user_id,
+                    TelegramSourceReference.track_id == track_id,
+                    TelegramSourceReference.source_chat_id
+                    == reference["source_chat_id"],
+                    TelegramSourceReference.source_message_id
+                    == reference["source_message_id"],
+                )
+            ).first() is None:
+                raise RuntimeError(
+                    "Post-import verification failed for Telegram references."
+                )
+
+    tags_by_track: defaultdict[int, list[int]] = defaultdict(list)
+    for association in tables.get("track_tags", []):
+        tags_by_track[int(association["track_id"])].append(
+            mappings["tag"][int(association["tag_id"])]
+        )
+    expected_tag_associations: set[tuple[int, int, int]] = set()
+    for track in tables["tracks"]:
+        playlist = playlists_by_id[int(track["playlist_id"])]
+        user_id = int(playlist["user_id"])
+        track_id = mappings["track"][int(track["id"])]
+        for tag_id in tags_by_track[int(track["id"])]:
+            association = (user_id, track_id, tag_id)
+            expected_tag_associations.add(association)
+            if connection.execute(
+                select(UserTrackTag.track_id).where(
+                    UserTrackTag.user_id == user_id,
+                    UserTrackTag.track_id == track_id,
+                    UserTrackTag.tag_id == tag_id,
+                )
+            ).first() is None:
+                raise RuntimeError("Post-import verification failed for personal tags.")
+
+    for row in tables.get("metadata_only_tracks", []):
+        user_id = int(row["owner_user_id"])
+        track_id = mappings["metadata_track"][int(row["id"])]
+        if connection.execute(
+            select(LibraryEntry.track_id).where(
+                LibraryEntry.user_id == user_id,
+                LibraryEntry.track_id == track_id,
+            )
+        ).first() is None:
+            raise RuntimeError(
+                "Post-import verification failed for metadata-only library entries."
+            )
+        expected_library_entries.add((user_id, track_id))
+
+    if connection.dialect.name == "sqlite":
+        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+        if violations:
+            raise RuntimeError("Post-import verification found foreign-key violations.")
+
+    mapping_counts["library_entries"] = len(expected_library_entries)
+    mapping_counts["playlist_items"] = len(expected_memberships)
+    mapping_counts["source_references"] = len(expected_references)
+    mapping_counts["tag_associations"] = len(expected_tag_associations)
+    return mapping_counts
+
+
 def run_legacy_backfill(
     source_url: str,
     target_url: str,
     source_key: str,
     *,
     apply: bool = False,
+    merge_existing: bool = False,
 ) -> dict[str, Any]:
     if (
         not source_key.strip()
@@ -1069,11 +1455,13 @@ def run_legacy_backfill(
                     snapshot,
                     validated,
                     fingerprint,
+                    merge_existing=merge_existing,
                 )
                 counts["verified"] = _verify_import(
                     connection,
                     source_key,
                     snapshot,
+                    merge_existing=merge_existing,
                 )
                 transaction.commit()
             except Exception:

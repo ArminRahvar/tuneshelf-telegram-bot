@@ -58,12 +58,6 @@ def backfill_legacy_library(database_url: str) -> None:
             )
         if track_count == 0 and metadata_count == 0:
             return
-        if normalized_library_count:
-            raise RuntimeError(
-                "Legacy library backfill found existing normalized library or "
-                "playlist data without the runtime cutover marker. Resolve the "
-                "existing import before starting the bot to avoid duplicate data."
-            )
 
         from app.database.legacy_backfill import run_legacy_backfill
 
@@ -72,6 +66,7 @@ def backfill_legacy_library(database_url: str) -> None:
             database_url,
             RUNTIME_BACKFILL_SOURCE_KEY,
             apply=True,
+            merge_existing=normalized_library_count > 0,
         )
     finally:
         engine.dispose()

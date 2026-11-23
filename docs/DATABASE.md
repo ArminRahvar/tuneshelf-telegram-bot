@@ -27,7 +27,11 @@ ID for each source message. Version 6 introduces users and message references
 and backfills references from existing tracks. The legacy startup migration
 sequence is preserved. After Alembic upgrades, startup imports existing
 personal-library rows into the normalized schema in-place once, preserving the
-legacy tables.
+legacy tables. If normalized library rows already exist from a partial prior
+import, the startup backfill reuses exact source-message references, Telegram
+file unique IDs, or MusicBrainz recording IDs, keeps existing annotations and
+preferences, and appends only missing playlist memberships. It does not merge by
+title or artist.
 
 ### PostgreSQL
 
@@ -35,7 +39,8 @@ legacy tables.
 IF NOT EXISTS`, performs selected `ADD COLUMN IF NOT EXISTS` operations, and
 backfills users and message references. Alembic applies the normalized schema
 on startup. Existing rows are imported into the normalized schema in-place
-before runtime library operations. The explicit legacy importer remains the
+before runtime library operations, using the same stable-identifier merge rules
+when normalized rows already exist. The explicit legacy importer remains the
 path for SQLite-to-PostgreSQL transfer; one backend's startup does not read or
 copy another backend's data.
 

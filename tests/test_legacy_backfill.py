@@ -27,6 +27,7 @@ from app.database.models import (
     UserTrackRating,
     UserTrackTag,
 )
+from app.database.migrations import RUNTIME_BACKFILL_SOURCE_KEY, backfill_legacy_library
 from database import Database
 
 
@@ -126,16 +127,68 @@ class LegacyBackfillTests(unittest.TestCase):
         finally:
             engine.dispose()
 
-    def test_runtime_backfill_rejects_existing_normalized_library_data(self) -> None:
+    def test_runtime_backfill_merges_existing_normalized_library_data(self) -> None:
         self._seed()
-        self.legacy.library_repository.create_metadata_only_track(
+        repository = self.legacy.library_repository
+        self.assertTrue(repository.create_playlist(42, "Favorites"))
+        favorites_id = repository.list_playlists(42)[0]["id"]
+        existing_track_id, _, _ = repository.add_audio_to_library(
             42,
-            "Already normalized",
+            100,
+            200,
+            "First track",
             "Artist",
+            "audio",
+            "unique-file",
+            release_title="Album",
+            musicbrainz_recording_id="00000000-0000-0000-0000-000000000001",
+            telegram_file_id="telegram-file",
+            duration_seconds=210,
+            mime_type="audio/mpeg",
+            original_filename="track.mp3",
+            release_year=2024,
         )
+        self.assertTrue(
+            repository.add_track_to_collection(42, existing_track_id, favorites_id)
+        )
+        self.assertTrue(repository.set_track_rating(42, existing_track_id, 4))
+        self.assertTrue(repository.set_delivery_mode(42, "copy"))
 
-        with self.assertRaisesRegex(RuntimeError, "existing normalized library"):
-            backfill_legacy_library(self.source_url)
+        backfill_legacy_library(self.source_url)
+        backfill_legacy_library(self.source_url)
+
+        self.assertEqual(len(repository.list_library(42)), 2)
+        self.assertEqual(len(repository.list_playlists(42)), 2)
+        self.assertEqual(len(repository.list_tracks_by_id(42, favorites_id)), 1)
+        self.assertEqual(
+            repository.get_track(42, existing_track_id)["rating"],
+            4,
+        )
+        self.assertEqual(
+            repository.get_track(42, existing_track_id)["note"],
+            "Keep this note",
+        )
+        self.assertEqual(
+            repository.list_track_tags(42, existing_track_id),
+            ["favorites"],
+        )
+        self.assertEqual(repository.get_delivery_mode(42), "copy")
+        engine = create_database_engine(self.source_url)
+        try:
+            with engine.connect() as connection:
+                marker = connection.execute(
+                    select(LegacyImportSource.source_key).where(
+                        LegacyImportSource.source_key
+                        == RUNTIME_BACKFILL_SOURCE_KEY
+                    )
+                ).scalar_one()
+                catalog_track_count = connection.execute(
+                    text("SELECT COUNT(*) FROM catalog_tracks")
+                ).scalar_one()
+        finally:
+            engine.dispose()
+        self.assertEqual(marker, RUNTIME_BACKFILL_SOURCE_KEY)
+        self.assertEqual(catalog_track_count, 2)
 
     def test_imports_early_sqlite_schema_without_optional_tables(self) -> None:
         old_source_path = Path(self.directory.name) / "version1.sqlite3"
