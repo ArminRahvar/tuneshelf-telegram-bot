@@ -20,7 +20,7 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Check Python syntax
-        run: python -m py_compile bot.py database.py postgres_database.py archive.py telegram_delivery.py musicbrainz.py app/__init__.py app/database/__init__.py app/database/engine.py app/database/models.py migrations/env.py migrations/versions/3ac461e85b53_add_normalized_catalog_and_library_.py tests/test_archive.py tests/test_bot.py tests/test_database.py tests/test_models.py tests/test_musicbrainz.py
+        run: python -m py_compile bot.py database.py postgres_database.py archive.py telegram_delivery.py musicbrainz.py app/__init__.py app/database/__init__.py app/database/engine.py app/database/legacy_inventory.py app/database/legacy_backfill.py app/database/models.py migrations/env.py migrations/versions/3ac461e85b53_add_normalized_catalog_and_library_.py migrations/versions/bc917af50d62_add_legacy_import_support.py tests/test_archive.py tests/test_bot.py tests/test_database.py tests/test_legacy_inventory.py tests/test_legacy_backfill.py tests/test_models.py tests/test_musicbrainz.py tests/test_repository_parity.py
 
   container-build:
     runs-on: ubuntu-latest
@@ -28,3 +28,31 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build container image
         run: docker build --tag playlist-bot:test .
+
+  postgres-parity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tuneshelf_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tuneshelf_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/tuneshelf_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run SQLite and PostgreSQL repository parity tests
+        run: python -m unittest discover -s tests -p 'test_repository_parity.py' -v

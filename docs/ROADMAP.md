@@ -19,11 +19,18 @@ tests exist.
    entry.
 2. SQLAlchemy models and an additive Alembic schema are in place. The bot still
    uses its legacy repositories, and this migration does not backfill data.
-3. Build a reversible, tested migration/backfill path from existing SQLite and
-   PostgreSQL data; preserve current adapters until parity is established.
-4. Add repository parity tests and expand ownership/migration coverage.
-5. Extract library/playlist use cases from `bot.py` behind repository/service
-   interfaces without changing Telegram UX.
+3. Read-only legacy inventory and a dry-run-by-default SQLite/PostgreSQL
+   backfill tool are implemented. The importer records fingerprints and ID
+   mappings, preserves user data and playlist order, and applies each import
+   transactionally. Keep current adapters until parity is established.
+4. Add a shared SQLite/PostgreSQL repository contract. The tests exercise it
+   locally on SQLite and in a PostgreSQL-backed CI job; fix behavioral
+   differences before switching runtime workflows.
+5. Continue extracting library/playlist use cases from `bot.py` behind
+   repository/service interfaces without changing Telegram UX. Audio saves,
+   metadata saves, collection copying and management, personal annotations/tags,
+   and delivery preferences now use the application service. Search, playback,
+   and transient interaction-state flows remain to be extracted.
 6. Switch individual workflows only after their backend parity tests pass.
 
 **Exit criteria:** legacy data is preserved, user isolation is tested at the

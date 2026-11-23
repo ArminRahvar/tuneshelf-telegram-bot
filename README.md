@@ -46,7 +46,38 @@ The normalized SQLAlchemy model is introduced additively and is not yet used by 
 DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' python3 -m alembic upgrade head
 ```
 
-This adds the new catalog/library tables while keeping the legacy tables intact; it does not backfill or transfer existing track data.
+This adds the new catalog/library tables while keeping the legacy tables intact.
+
+Before planning a backfill, inspect the current database without modifying it:
+
+```sh
+DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' python3 -m app.database.legacy_inventory
+```
+
+The inventory reports counts and integrity/conflict totals only; it does not print track metadata or user IDs.
+
+The backfill reads `LEGACY_DATABASE_URL` in a read-only transaction and writes
+to the database in `DATABASE_URL`. First create/upgrade the target schema, then
+run a dry-run (the default) with a stable, non-secret source label:
+
+```sh
+LEGACY_DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' \
+DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' \
+python3 -m app.database.legacy_backfill --source-key my-library-2026
+```
+
+Review the aggregate report and ensure you have a verified backup before
+repeating the command with `--apply`. Use a separate target URL to transfer
+between backends, for example from SQLite to PostgreSQL. The importer creates
+one catalog track per legacy track row (no heuristic merging), preserves
+playlist order, personal annotations, tags, preferences, metadata-only tracks,
+and source Telegram references, and records stable ID mappings. It does not
+import transient `pending_tracks` or `user_states`. A successful import is
+idempotent for the same source snapshot and source key; changing that source
+later under the same key is rejected for review. Apply is one target
+transaction and any conflict rolls back the full import. The dry-run validates
+the source and target schema without writing either database; target data
+conflicts are surfaced during apply and rolled back.
 
 MusicBrainz enrichment/search is optional. Configure a contact email for its User-Agent:
 
@@ -105,7 +136,7 @@ target model, and [docs/ROADMAP.md](docs/ROADMAP.md) for staged development.
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover migrations, collection ownership, multiple/unavailable source references, metadata-only entries, ratings/notes/tags, MusicBrainz matching and URL validation, Telegram delivery policy, callback flows, and bounded collection playback. Telegram and MusicBrainz network calls are mocked; a live PostgreSQL server is needed to integration-test the PostgreSQL adapter.
+Tests cover migrations, collection ownership, multiple/unavailable source references, metadata-only entries, ratings/notes/tags, MusicBrainz matching and URL validation, Telegram delivery policy, callback flows, and bounded collection playback. A shared repository contract runs against SQLite locally and against PostgreSQL in CI. Telegram and MusicBrainz network calls are mocked.
 
 ## Limitations
 

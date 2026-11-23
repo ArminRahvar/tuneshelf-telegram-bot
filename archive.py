@@ -1,7 +1,7 @@
 """Telegram-independent domain and application services for personal music archives."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,23 @@ class TelegramMessageReference:
 
 
 class ArchiveRepository(Protocol):
-    def get_playlist(self, user_id: int, playlist_id: int) -> object | None: ...
+    def get_playlist(self, user_id: int, playlist_id: int) -> Any | None: ...
+
+    def list_playlists(self, user_id: int) -> list[Any]: ...
+
+    def create_playlist(self, user_id: int, name: str) -> bool: ...
+
+    def rename_playlist(self, user_id: int, playlist_id: int, name: str) -> bool: ...
+
+    def delete_playlist_by_id(self, user_id: int, playlist_id: int) -> bool: ...
+
+    def list_tracks_by_id(
+        self, user_id: int, playlist_id: int
+    ) -> list[Any] | None: ...
+
+    def remove_track_by_id(
+        self, user_id: int, playlist_id: int, track_id: int
+    ) -> bool: ...
 
     def add_track_to_playlist(
         self,
@@ -64,7 +80,7 @@ class ArchiveRepository(Protocol):
 
     def get_available_message_reference(
         self, user_id: int, track_id: int
-    ) -> object | None: ...
+    ) -> Any | None: ...
 
     def add_track_to_collection(
         self, user_id: int, track_id: int, collection_id: int
@@ -81,6 +97,12 @@ class ArchiveRepository(Protocol):
     ) -> bool: ...
 
     def add_track_tag(self, user_id: int, track_id: int, name: str) -> bool: ...
+
+    def remove_track_tag(self, user_id: int, track_id: int, name: str) -> bool: ...
+
+    def get_delivery_mode(self, user_id: int) -> str: ...
+
+    def set_delivery_mode(self, user_id: int, mode: str) -> bool: ...
 
     def create_metadata_only_track(
         self,
@@ -129,8 +151,47 @@ class PersonalMusicArchive:
 
     def get_playable_reference(
         self, owner_user_id: int, track_id: int
-    ) -> object | None:
+    ) -> Any | None:
         return self.repository.get_available_message_reference(owner_user_id, track_id)
+
+    def list_collections(self, owner_user_id: int) -> list[Any]:
+        return self.repository.list_playlists(owner_user_id)
+
+    def get_collection(self, owner_user_id: int, collection_id: int) -> Any | None:
+        return self.repository.get_playlist(owner_user_id, collection_id)
+
+    def create_collection(self, owner_user_id: int, name: str) -> bool:
+        return self.repository.create_playlist(owner_user_id, name)
+
+    def rename_collection(
+        self,
+        owner_user_id: int,
+        collection_id: int,
+        name: str,
+    ) -> bool:
+        return self.repository.rename_playlist(owner_user_id, collection_id, name)
+
+    def delete_collection(self, owner_user_id: int, collection_id: int) -> bool:
+        return self.repository.delete_playlist_by_id(owner_user_id, collection_id)
+
+    def list_collection_tracks(
+        self,
+        owner_user_id: int,
+        collection_id: int,
+    ) -> list[Any] | None:
+        return self.repository.list_tracks_by_id(owner_user_id, collection_id)
+
+    def remove_from_collection(
+        self,
+        owner_user_id: int,
+        collection_id: int,
+        track_id: int,
+    ) -> bool:
+        return self.repository.remove_track_by_id(
+            owner_user_id,
+            collection_id,
+            track_id,
+        )
 
     def add_to_collection(
         self, owner_user_id: int, track_id: int, collection_id: int
@@ -162,6 +223,15 @@ class PersonalMusicArchive:
 
     def add_tag(self, owner_user_id: int, track_id: int, tag: str) -> bool:
         return self.repository.add_track_tag(owner_user_id, track_id, tag)
+
+    def remove_tag(self, owner_user_id: int, track_id: int, tag: str) -> bool:
+        return self.repository.remove_track_tag(owner_user_id, track_id, tag)
+
+    def get_delivery_mode(self, owner_user_id: int) -> str:
+        return self.repository.get_delivery_mode(owner_user_id)
+
+    def set_delivery_mode(self, owner_user_id: int, mode: str) -> bool:
+        return self.repository.set_delivery_mode(owner_user_id, mode)
 
     def save_metadata_only(
         self,

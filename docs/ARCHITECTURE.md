@@ -9,18 +9,24 @@ worker process.
 | Component | Responsibility |
 | --- | --- |
 | `bot.py` | Telegram Bot API HTTP calls, long polling, command and callback handling, menus, interaction state, MusicBrainz orchestration, and delivery retries |
-| `archive.py` | Telegram-independent track metadata and message-reference value objects and a small application service/repository protocol |
+| `archive.py` | Telegram-independent track metadata and message-reference value objects and an application service/repository protocol for collection management, saves, annotations, collection copies, and delivery preferences |
 | `database.py` | SQLite schema migrations and repository operations |
 | `postgres_database.py` | PostgreSQL schema setup and repository operations using psycopg |
 | `telegram_delivery.py` | `copyMessage` versus `forwardMessage` delivery policy |
 | `musicbrainz.py` | Synchronous MusicBrainz recording search, URL lookup, response parsing, throttling, and in-memory caching |
 | `app/database/models.py` | Additive SQLAlchemy model for the normalized catalog, archive, library, playlist, and personal metadata schema |
+| `app/database/legacy_inventory.py` | Read-only legacy database inventory for migration preflight |
+| `app/database/legacy_backfill.py` | Dry-run-by-default import from a legacy SQLite/PostgreSQL database into the normalized schema |
 | `migrations/` | Explicit Alembic migrations; the initial revision creates the normalized schema without replacing legacy tables |
 
-`bot.py` calls the repository directly for most workflows. The `archive.py`
-service is used for selected operations, but does not yet isolate the bot from
-the persistence API. Both database adapters implement similar behavior
-separately, so backend behavior can diverge.
+`bot.py` still calls the repository directly for search, playback, and
+transient interaction state. Its `archive.py` service handles collection
+listing, lookup, creation, renaming, deletion, track listing and removal, plus
+audio and metadata-only saves, collection copies, personal rating/note/tag
+edits, and delivery preferences. Shared SQLite/PostgreSQL contract tests cover
+common library behavior; the PostgreSQL contract runs in a dedicated CI job.
+Both database adapters implement behavior separately, so remaining workflows
+still need parity coverage before a runtime switch.
 
 The bot stores Telegram source-message references and metadata; it does not
 download audio or upload it to a shared archive. Playback copies or forwards
@@ -53,9 +59,9 @@ sequentially.
   identifier.
 - `bot.py` and both database adapters are large modules containing multiple
   responsibilities.
--   The bot repositories still use the legacy SQL implementations; the new
-  SQLAlchemy models and Alembic schema are not yet wired into runtime workflows.
-  There is no ytmusicapi provider,
+- The bot repositories still use the legacy SQL implementations; the new
+  SQLAlchemy models and Alembic schema are not yet wired into runtime
+  persistence. There is no ytmusicapi provider,
   yt-dlp/FFmpeg integration, download queue, or background worker.
 
 ## Target architecture

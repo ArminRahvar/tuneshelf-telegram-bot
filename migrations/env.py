@@ -4,7 +4,7 @@ import os
 from alembic import context
 from sqlalchemy import pool
 
-from app.database.engine import create_database_engine
+from app.database.engine import create_database_engine, normalize_database_url
 from app.database.models import Base
 
 
@@ -31,11 +31,7 @@ def _database_url() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
     if not url:
         raise RuntimeError("Set DATABASE_URL before running Alembic.")
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg://", 1)
-    return url
+    return normalize_database_url(url)
 
 
 def _compare_type(

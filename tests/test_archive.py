@@ -62,6 +62,10 @@ class ArchiveTests(unittest.TestCase):
 
         self.assertFalse(self.archive.set_rating(99, track["id"], 5))
         self.assertIsNone(self.archive.get_playable_reference(99, track["id"]))
+        self.assertTrue(self.archive.remove_tag(42, track["id"], "live"))
+        self.assertEqual(self.archive.get_delivery_mode(42), "copy")
+        self.assertTrue(self.archive.set_delivery_mode(42, "forward"))
+        self.assertEqual(self.archive.get_delivery_mode(42), "forward")
 
     def test_metadata_only_track_has_no_playable_reference(self) -> None:
         track_id = self.archive.save_metadata_only(
@@ -72,6 +76,45 @@ class ArchiveTests(unittest.TestCase):
 
         self.assertEqual(self.repository.list_metadata_only_tracks(42)[0]["id"], track_id)
         self.assertEqual(self.repository.list_message_references(42, track_id), None)
+
+    def test_collection_operations_are_owner_scoped(self) -> None:
+        self.assertTrue(self.archive.create_collection(42, "Road trip"))
+        collections = self.archive.list_collections(42)
+        road_trip = next(row for row in collections if row["name"] == "Road trip")
+        collection_id = int(road_trip["id"])
+
+        self.assertIsNone(self.archive.get_collection(99, collection_id))
+        self.assertIsNone(self.archive.list_collection_tracks(99, collection_id))
+        self.assertFalse(self.archive.rename_collection(99, collection_id, "Hijacked"))
+        self.assertFalse(self.archive.delete_collection(99, collection_id))
+        self.assertFalse(self.archive.create_collection(42, "road TRIP"))
+
+        self.assertTrue(
+            self.archive.save_audio(
+                42,
+                collection_id,
+                TrackMetadata("Track"),
+                TelegramMessageReference(100, 1, "audio"),
+            )
+        )
+        track = self.archive.list_collection_tracks(42, collection_id)[0]
+        self.assertTrue(
+            self.archive.remove_from_collection(
+                42,
+                collection_id,
+                int(track["id"]),
+            )
+        )
+        self.assertEqual(self.archive.list_collection_tracks(42, collection_id), [])
+        self.assertTrue(
+            self.archive.rename_collection(42, collection_id, "New road trip")
+        )
+        self.assertEqual(
+            self.archive.get_collection(42, collection_id)["name"],
+            "New road trip",
+        )
+        self.assertTrue(self.archive.delete_collection(42, collection_id))
+        self.assertIsNone(self.archive.get_collection(42, collection_id))
 
     def test_metadata_and_reference_values_are_validated(self) -> None:
         with self.assertRaises(ValueError):

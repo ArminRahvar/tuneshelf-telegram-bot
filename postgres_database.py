@@ -405,7 +405,7 @@ class PostgresDatabase:
                 SELECT id, source_chat_id, source_message_id, title, performer,
                        media_type, file_unique_id, release_title,
                        musicbrainz_recording_id, telegram_file_id, duration_seconds,
-                       mime_type, original_filename, rating, note
+                       mime_type, original_filename, rating, note, release_year
                 FROM tracks WHERE playlist_id = %s ORDER BY id
                 """,
                 (playlist_id,),
@@ -735,8 +735,8 @@ class PostgresDatabase:
                     playlist_id, source_chat_id, source_message_id, title, performer,
                     media_type, file_unique_id, release_title, musicbrainz_recording_id,
                     telegram_file_id, duration_seconds, mime_type, original_filename,
-                    rating, note
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    rating, note, release_year
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -746,6 +746,7 @@ class PostgresDatabase:
                     source["musicbrainz_recording_id"], source["telegram_file_id"],
                     source["duration_seconds"], source["mime_type"],
                     source["original_filename"], source["rating"], source["note"],
+                    source["release_year"],
                 ),
             ).fetchone()
             new_track_id = inserted["id"]

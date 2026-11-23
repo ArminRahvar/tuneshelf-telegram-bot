@@ -96,8 +96,38 @@ SQLite's Alembic reflection cannot compare expression-based indexes reliably,
 so those indexes should be reviewed manually in future generated revisions.
 
 `alembic upgrade head` only creates this parallel schema; it does not move
-legacy data or switch application repositories. That backfill and cutover
-remain separate, unimplemented steps.
+legacy data or switch application repositories. A second additive revision
+adds delivery preferences, source/import fingerprints and legacy-ID mappings,
+preserves MIME types on source references, and permits the same Telegram
+message to be associated with separate per-user track rows. Downgrading this
+revision is blocked once import metadata or preferences exist.
+
+Before a backfill, `python -m app.database.legacy_inventory` performs a
+read-only inventory of legacy table counts and ownership/duplicate anomalies.
+It emits aggregate counts only, requires an existing SQLite source file, and
+does not create tables or modify the source database.
+
+`python -m app.database.legacy_backfill --source-key <stable-label>` is the
+backfill tool. It reads a SQLite or PostgreSQL legacy source in a read-only
+transaction and writes only when explicitly passed `--apply`. The target must
+already be at Alembic head. The default dry-run validates source ownership and
+target schema and reports counts without writing either database. Apply
+records a source fingerprint and old-to-new mappings and runs the import and
+integrity checks inside one target transaction. Repeating an unchanged source
+with the same key is a no-op; a changed source under that key is rejected.
+Target conflicts abort and roll back the whole import.
+
+The initial policy intentionally creates one catalog track for each legacy
+track row and a separate catalog track for each metadata-only row. It does not
+deduplicate by title or file ID. Playlist order follows ascending legacy track
+ID. It preserves playlists, library membership, ratings, notes, tags, all
+known Telegram source references (including availability, file identifiers,
+MIME type, and filename), metadata-only provider details, and delivery
+preferences. References remain source references and do not become shared
+archive assets. Transient `pending_tracks` and `user_states` are not imported.
+The inventory and dry-run do not guarantee that the target has no conflicting
+data; the apply transaction is authoritative and rolls back on any uniqueness
+or annotation conflict.
 
 ## Migration-safe path
 
@@ -109,13 +139,17 @@ auditable operation:
 2. Create and test the new versioned schema on an empty database. The additive
    schema foundation is now in place.
 3. Inventory legacy rows using counts and relationship checks, without
-   exporting media or credentials.
+   exporting media or credentials. Both a read-only preflight and a
+   dry-run-by-default backfill command are available.
 4. Backfill users and playlists, then map legacy track rows to catalog tracks,
    user-library memberships, personal annotations, and playlist memberships.
+   The initial SQLite/PostgreSQL importer uses explicit apply, stable mappings,
+   source fingerprints, and transaction rollback.
 5. Preserve source Telegram references as source references. Do not treat them
    as shared archive assets until a real archive copy exists.
 6. Preserve legacy IDs when practical or keep an explicit old-to-new ID mapping
-   for callbacks and references during cutover.
+   for callbacks and references during cutover. The importer records mappings
+   for playlists, playable tracks, and metadata-only tracks.
 7. Avoid heuristic merging in the first migration. Exact duplicate evidence
    (such as the same source message) may be handled deterministically; uncertain
    title/artist matches should remain separate pending a reviewed deduplication
@@ -129,9 +163,9 @@ auditable operation:
     procedures are exercised. Do not make application startup silently migrate
     production data during the initial rollout.
 
-SQLite-to-PostgreSQL transfer is a separate concern from schema migration.
-Switching `DATABASE_URL` currently selects a backend but does not copy data;
-that behavior must remain explicit until a tested export/import tool exists.
+Switching `DATABASE_URL` still only selects a backend; it does not copy data.
+SQLite-to-PostgreSQL transfer uses the explicit backfill command and remains
+separate from bot startup and schema migration.
 
 ## Required migration tests
 

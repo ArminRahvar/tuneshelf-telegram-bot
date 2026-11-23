@@ -313,7 +313,7 @@ def _show_settings(
     api: TelegramAPI,
     message_id: int | None,
 ) -> None:
-    mode = database.get_delivery_mode(user_id)
+    mode = PersonalMusicArchive(database).get_delivery_mode(user_id)
     description = (
         "Copy source message (recommended; hides source attribution)."
         if mode == "copy"
@@ -393,7 +393,7 @@ def _show_playlists(
     page: int = 0,
     notice: str | None = None,
 ) -> None:
-    playlists = database.list_playlists(user_id)
+    playlists = PersonalMusicArchive(database).list_collections(user_id)
     page_count = max(1, (len(playlists) + PLAYLISTS_PER_PAGE - 1) // PLAYLISTS_PER_PAGE)
     page = min(max(page, 0), page_count - 1)
     start = page * PLAYLISTS_PER_PAGE
@@ -466,7 +466,7 @@ def _show_playlist(
     api: TelegramAPI,
     message_id: int | None,
 ) -> None:
-    playlist = database.get_playlist(user_id, playlist_id)
+    playlist = PersonalMusicArchive(database).get_collection(user_id, playlist_id)
     if playlist is None:
         _show_playlists(user_id, chat_id, database, api, message_id)
         return
@@ -496,8 +496,9 @@ def _show_tracks(
     api: TelegramAPI,
     message_id: int,
 ) -> None:
-    playlist = database.get_playlist(user_id, playlist_id)
-    tracks = database.list_tracks_by_id(user_id, playlist_id)
+    archive = PersonalMusicArchive(database)
+    playlist = archive.get_collection(user_id, playlist_id)
+    tracks = archive.list_collection_tracks(user_id, playlist_id)
     if playlist is None or tracks is None:
         _show_playlists(user_id, chat_id, database, api, message_id)
         return
@@ -621,11 +622,11 @@ def _save_track(
     source_message_id: int,
     database: Database,
 ) -> tuple[str, bool] | None:
-    playlist = database.get_playlist(user_id, playlist_id)
+    archive = PersonalMusicArchive(database)
+    playlist = archive.get_collection(user_id, playlist_id)
     pending = database.get_pending_track(user_id, source_chat_id, source_message_id)
     if playlist is None or pending is None:
         return None
-    archive = PersonalMusicArchive(database)
     saved = archive.save_audio(
         user_id,
         playlist_id,
@@ -659,7 +660,10 @@ def _deliver_track(
     database: Database,
     api: TelegramAPI,
 ) -> bool:
-    reference = database.get_available_message_reference(user_id, track["id"])
+    reference = PersonalMusicArchive(database).get_playable_reference(
+        user_id,
+        track["id"],
+    )
     if reference is None:
         api.send_message(
             chat_id,
@@ -667,7 +671,10 @@ def _deliver_track(
             "Send another copy of the audio, then use /link to associate it.",
         )
         return False
-    delivery = TelegramDeliveryService(api, database.get_delivery_mode(user_id))
+    delivery = TelegramDeliveryService(
+        api,
+        PersonalMusicArchive(database).get_delivery_mode(user_id),
+    )
     try:
         delivery.deliver(
             chat_id, reference["source_chat_id"], reference["source_message_id"]
@@ -807,7 +814,12 @@ def handle_message(
         title = title_and_artist[0].strip()
         performer = title_and_artist[1].strip() if len(title_and_artist) == 2 else None
         try:
-            changed = database.update_track_metadata(user_id, track_id, title, performer)
+            changed = PersonalMusicArchive(database).update_metadata(
+                user_id,
+                track_id,
+                title,
+                performer,
+            )
         except ValueError as error:
             api.send_message(chat_id, str(error))
             return
@@ -826,7 +838,11 @@ def handle_message(
         try:
             track_id = int(pieces[0])
             rating = None if pieces[1].lower() == "clear" else int(pieces[1])
-            updated = database.set_track_rating(user_id, track_id, rating)
+            updated = PersonalMusicArchive(database).set_rating(
+                user_id,
+                track_id,
+                rating,
+            )
         except ValueError as error:
             api.send_message(chat_id, f"Invalid rating: {error}")
             return
@@ -873,7 +889,7 @@ def handle_message(
         if len(note or "") > 1000:
             api.send_message(chat_id, "Notes are limited to 1000 characters.")
             return
-        updated = database.set_track_note(user_id, track_id, note)
+        updated = PersonalMusicArchive(database).set_note(user_id, track_id, note)
         api.send_message(
             chat_id,
             "Note updated." if updated else "That track is not in your personal library.",
@@ -887,9 +903,13 @@ def handle_message(
         try:
             track_id = int(pieces[0])
             changed = (
-                database.add_track_tag(user_id, track_id, pieces[1])
+                PersonalMusicArchive(database).add_tag(user_id, track_id, pieces[1])
                 if command == "/tag"
-                else database.remove_track_tag(user_id, track_id, pieces[1])
+                else PersonalMusicArchive(database).remove_tag(
+                    user_id,
+                    track_id,
+                    pieces[1],
+                )
             )
         except ValueError as error:
             api.send_message(chat_id, str(error))
@@ -946,7 +966,7 @@ def handle_message(
         )
         return
     if command == "/collections":
-        collections = database.list_collections(user_id)
+        collections = PersonalMusicArchive(database).list_collections(user_id)
         if not collections:
             api.send_message(chat_id, "You do not have any collections yet.")
         else:
@@ -1093,7 +1113,7 @@ def handle_message(
         if not playlist_name or len(playlist_name) > 64:
             api.send_message(chat_id, "Playlist names must contain 1–64 characters. Try again.")
             return
-        if not database.create_playlist(user_id, playlist_name):
+        if not PersonalMusicArchive(database).create_collection(user_id, playlist_name):
             database.clear_user_state(user_id)
             if state.count(":") == 2:
                 _, source_chat_id, source_message_id = state.split(":")
@@ -1144,18 +1164,28 @@ def handle_message(
             try:
                 if action == "rate_track":
                     value = None if text.lower() == "clear" else int(text)
-                    changed = database.set_track_rating(user_id, track_id, value)
+                    changed = PersonalMusicArchive(database).set_rating(
+                        user_id,
+                        track_id,
+                        value,
+                    )
                 elif action == "note_track":
                     if len(text) > 500:
                         raise ValueError("Notes must be at most 500 characters.")
-                    changed = database.set_track_note(
-                        user_id, track_id, None if text.lower() == "clear" else text
+                    changed = PersonalMusicArchive(database).set_note(
+                        user_id,
+                        track_id,
+                        None if text.lower() == "clear" else text,
                     )
                 elif action == "tag_track":
-                    changed = database.add_track_tag(user_id, track_id, text)
+                    changed = PersonalMusicArchive(database).add_tag(
+                        user_id,
+                        track_id,
+                        text,
+                    )
                 else:
                     pieces = text.split("|", maxsplit=1)
-                    changed = database.update_track_metadata(
+                    changed = PersonalMusicArchive(database).update_metadata(
                         user_id,
                         track_id,
                         pieces[0].strip(),
@@ -1192,13 +1222,14 @@ def handle_message(
         if not playlist_name or len(playlist_name) > 64:
             api.send_message(chat_id, "Playlist names must contain 1–64 characters. Try again.")
             return
-        playlist = database.get_playlist(user_id, playlist_id)
+        archive = PersonalMusicArchive(database)
+        playlist = archive.get_collection(user_id, playlist_id)
         if playlist is None:
             database.clear_user_state(user_id)
             api.send_message(chat_id, "That playlist no longer exists.")
             _show_playlists(user_id, chat_id, database, api)
             return
-        if not database.rename_playlist(user_id, playlist_id, playlist_name):
+        if not archive.rename_collection(user_id, playlist_id, playlist_name):
             database.clear_user_state(user_id)
             api.send_message(
                 chat_id,
@@ -1342,7 +1373,7 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
     elif action == "settings":
         _show_settings(user_id, chat_id, database, api, message_id)
     elif action == "delivery" and len(parts) == 2 and parts[1] in {"copy", "forward"}:
-        database.set_delivery_mode(user_id, parts[1])
+        PersonalMusicArchive(database).set_delivery_mode(user_id, parts[1])
         _show_settings(user_id, chat_id, database, api, message_id)
     elif action == "track" and len(parts) == 2:
         _show_track_detail(
@@ -1492,7 +1523,7 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
     elif action == "rename" and len(parts) == 2:
         _clear_interaction_state(database, user_id)
         playlist_id = int(parts[1])
-        if database.get_playlist(user_id, playlist_id) is None:
+        if PersonalMusicArchive(database).get_collection(user_id, playlist_id) is None:
             _show_playlists(user_id, chat_id, database, api, message_id)
         else:
             database.set_user_state(user_id, f"rename:{playlist_id}")
@@ -1539,8 +1570,9 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
             )
     elif action in ("play", "shuffle") and len(parts) == 2:
         playlist_id = int(parts[1])
-        playlist = database.get_playlist(user_id, playlist_id)
-        tracks = database.list_tracks_by_id(user_id, playlist_id)
+        archive = PersonalMusicArchive(database)
+        playlist = archive.get_collection(user_id, playlist_id)
+        tracks = archive.list_collection_tracks(user_id, playlist_id)
         if playlist is None or tracks is None:
             _show_playlists(user_id, chat_id, database, api, message_id)
         elif not tracks:
@@ -1574,13 +1606,20 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
                 _deliver_track(user_id, chat_id, track, database, api)
     elif action == "remove" and len(parts) == 3:
         playlist_id, track_id = map(int, parts[1:])
-        if database.remove_track_by_id(user_id, playlist_id, track_id):
+        if PersonalMusicArchive(database).remove_from_collection(
+            user_id,
+            playlist_id,
+            track_id,
+        ):
             _show_tracks(user_id, chat_id, playlist_id, 0, database, api, message_id)
         else:
             _show_playlist(user_id, chat_id, playlist_id, database, api, message_id)
     elif action == "delete" and len(parts) == 2:
         playlist_id = int(parts[1])
-        playlist = database.get_playlist(user_id, playlist_id)
+        playlist = PersonalMusicArchive(database).get_collection(
+            user_id,
+            playlist_id,
+        )
         if playlist is None:
             _show_playlists(user_id, chat_id, database, api, message_id)
         else:
@@ -1595,7 +1634,7 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
                 message_id,
             )
     elif action == "confirm_delete" and len(parts) == 2:
-        database.delete_playlist_by_id(user_id, int(parts[1]))
+        PersonalMusicArchive(database).delete_collection(user_id, int(parts[1]))
         _show_playlists(user_id, chat_id, database, api, message_id)
     else:
         _show_home(api, chat_id, message_id, "That menu action is no longer available.")

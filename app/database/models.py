@@ -245,6 +245,7 @@ class TelegramSourceReference(Base):
         ),
         UniqueConstraint(
             "user_id",
+            "track_id",
             "source_chat_id",
             "source_message_id",
             name="uq_source_reference_message",
@@ -267,6 +268,7 @@ class TelegramSourceReference(Base):
     telegram_file_id: Mapped[str | None] = mapped_column(Text)
     telegram_file_unique_id: Mapped[str | None] = mapped_column(Text)
     media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(255))
     original_filename: Mapped[str | None] = mapped_column(Text)
     is_available: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=true()
@@ -439,3 +441,79 @@ class UserTrackTag(Base):
     user_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
     track_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
     tag_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
+
+
+class UserPreference(Base):
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        CheckConstraint(
+            "delivery_mode IN ('copy', 'forward')",
+            name="ck_user_preference_delivery_mode",
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ID_TYPE,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    delivery_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class LegacyImportMap(Base):
+    __tablename__ = "legacy_import_maps"
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('playlist', 'track', 'metadata_track', 'tag')",
+            name="ck_legacy_import_map_entity_type",
+        ),
+        CheckConstraint(
+            "length(trim(source_key)) BETWEEN 1 AND 128",
+            name="ck_legacy_import_map_source_key",
+        ),
+        CheckConstraint("legacy_id > 0", name="ck_legacy_import_map_legacy_id"),
+        CheckConstraint("target_id > 0", name="ck_legacy_import_map_target_id"),
+        Index("ix_legacy_import_maps_target", "entity_type", "target_id"),
+    )
+
+    source_key: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("legacy_import_sources.source_key", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    entity_type: Mapped[str] = mapped_column(String(24), primary_key=True)
+    legacy_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ID_TYPE, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+
+
+class LegacyImportSource(Base):
+    __tablename__ = "legacy_import_sources"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(source_key)) BETWEEN 1 AND 128",
+            name="ck_legacy_import_source_key",
+        ),
+        CheckConstraint(
+            "length(fingerprint) = 64",
+            name="ck_legacy_import_source_fingerprint",
+        ),
+        CheckConstraint(
+            "source_dialect IN ('sqlite', 'postgresql')",
+            name="ck_legacy_import_source_dialect",
+        ),
+    )
+
+    source_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_dialect: Mapped[str] = mapped_column(String(16), nullable=False)
+    sqlite_schema_version: Mapped[int | None] = mapped_column(Integer)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
