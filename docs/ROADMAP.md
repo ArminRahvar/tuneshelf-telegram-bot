@@ -14,12 +14,14 @@ tests exist.
 
 ### Next implementation milestones
 
-1. Agree on the target ownership and association constraints before changing
-   persistence.
-2. Add SQLAlchemy models and Alembic configuration for the normalized model.
+1. Target ownership constraints are defined in the normalized model: playlist
+   items must reference both an owner-matching playlist and the owner's library
+   entry.
+2. SQLAlchemy models and an additive Alembic schema are in place. The bot still
+   uses its legacy repositories, and this migration does not backfill data.
 3. Build a reversible, tested migration/backfill path from existing SQLite and
    PostgreSQL data; preserve current adapters until parity is established.
-4. Add focused ownership, migration, and repository tests.
+4. Add repository parity tests and expand ownership/migration coverage.
 5. Extract library/playlist use cases from `bot.py` behind repository/service
    interfaces without changing Telegram UX.
 6. Switch individual workflows only after their backend parity tests pass.

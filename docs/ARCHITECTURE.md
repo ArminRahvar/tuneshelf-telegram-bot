@@ -14,6 +14,8 @@ worker process.
 | `postgres_database.py` | PostgreSQL schema setup and repository operations using psycopg |
 | `telegram_delivery.py` | `copyMessage` versus `forwardMessage` delivery policy |
 | `musicbrainz.py` | Synchronous MusicBrainz recording search, URL lookup, response parsing, throttling, and in-memory caching |
+| `app/database/models.py` | Additive SQLAlchemy model for the normalized catalog, archive, library, playlist, and personal metadata schema |
+| `migrations/` | Explicit Alembic migrations; the initial revision creates the normalized schema without replacing legacy tables |
 
 `bot.py` calls the repository directly for most workflows. The `archive.py`
 service is used for selected operations, but does not yet isolate the bot from
@@ -51,7 +53,9 @@ sequentially.
   identifier.
 - `bot.py` and both database adapters are large modules containing multiple
   responsibilities.
-- The project has no SQLAlchemy models, Alembic history, ytmusicapi provider,
+-   The bot repositories still use the legacy SQL implementations; the new
+  SQLAlchemy models and Alembic schema are not yet wired into runtime workflows.
+  There is no ytmusicapi provider,
   yt-dlp/FFmpeg integration, download queue, or background worker.
 
 ## Target architecture

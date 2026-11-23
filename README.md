@@ -19,9 +19,10 @@ The bot ignores chats other than private chats. `/start` and `/help` open the ma
 
 ## Run locally
 
-Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set, so the local test/development workflow needs no third-party package:
+Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set. The existing bot can run with the Python standard library; install the requirements to run the test suite or use the new Alembic schema:
 
 ```sh
+python3 -m pip install -r requirements.txt
 export BOT_TOKEN='your-token-from-botfather'
 export DATABASE_PATH='./playlist_bot.sqlite3'  # optional; this is the default
 python3 bot.py
@@ -38,6 +39,14 @@ python3 bot.py
 The PostgreSQL database/user must already exist. The bot applies its idempotent schema setup at startup. SQLite schema migrations use `PRAGMA user_version` and are also applied automatically.
 
 Setting `DATABASE_URL` switches backends; existing SQLite data is not copied automatically. Keep a backup and migrate/export any existing SQLite library before switching a populated installation to PostgreSQL.
+
+The normalized SQLAlchemy model is introduced additively and is not yet used by the bot repositories. To create its schema explicitly, set `DATABASE_URL` to the target database and run:
+
+```sh
+DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' python3 -m alembic upgrade head
+```
+
+This adds the new catalog/library tables while keeping the legacy tables intact; it does not backfill or transfer existing track data.
 
 MusicBrainz enrichment/search is optional. Configure a contact email for its User-Agent:
 

@@ -15,10 +15,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: Check Python syntax
-        run: python -m py_compile bot.py database.py postgres_database.py archive.py telegram_delivery.py musicbrainz.py tests/test_archive.py tests/test_bot.py tests/test_database.py tests/test_musicbrainz.py
+        run: python -m py_compile bot.py database.py postgres_database.py archive.py telegram_delivery.py musicbrainz.py app/__init__.py app/database/__init__.py app/database/engine.py app/database/models.py migrations/env.py migrations/versions/3ac461e85b53_add_normalized_catalog_and_library_.py tests/test_archive.py tests/test_bot.py tests/test_database.py tests/test_models.py tests/test_musicbrainz.py
 
   container-build:
     runs-on: ubuntu-latest

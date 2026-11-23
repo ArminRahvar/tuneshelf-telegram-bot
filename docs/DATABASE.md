@@ -67,9 +67,37 @@ Key invariants:
    ownership invariants.
 8. Use UTC timestamps and transactions for related writes.
 
-The exact foreign-key layout and uniqueness policy should be finalized before
-the first Alembic migration. In particular, owner-scoped relationships can use
-composite foreign keys where supported by the selected schema design.
+The initial Alembic revision establishes these owner-scoped foreign-key and
+uniqueness rules. Further changes to them must use follow-up revisions rather
+than editing an already deployed revision.
+
+## Additive schema foundation
+
+The first Alembic revision is deliberately additive so the current bot and its
+legacy tables can remain operational during the transition. It introduces:
+
+- `catalog_tracks`, `artists`, `albums`, `genres`, and catalog association
+  tables.
+- `archive_assets` for shared archive messages and
+  `telegram_source_references` for user-provided Telegram messages.
+- `library_entries`, `user_playlists`, `playlist_items`, and separate personal
+  tag/note/rating tables.
+
+The legacy `users` table is reused because both current adapters already have
+the required Telegram ID primary key. The migration creates it only when
+missing and intentionally leaves it in place on downgrade. Other legacy tables
+are neither renamed nor dropped. New playlist items have composite foreign
+keys to both their user-owned playlist and that same user's library entry;
+position and membership are unique per playlist. Personal annotations and
+source references similarly reference an owner-scoped library entry.
+
+The case-insensitive name indexes are written explicitly in the revision:
+SQLite's Alembic reflection cannot compare expression-based indexes reliably,
+so those indexes should be reviewed manually in future generated revisions.
+
+`alembic upgrade head` only creates this parallel schema; it does not move
+legacy data or switch application repositories. That backfill and cutover
+remain separate, unimplemented steps.
 
 ## Migration-safe path
 
@@ -78,7 +106,8 @@ place as an initial experiment. The migration should be a separately testable,
 auditable operation:
 
 1. Take a verified backup and record source backend/schema version.
-2. Create and test the new versioned schema on an empty database.
+2. Create and test the new versioned schema on an empty database. The additive
+   schema foundation is now in place.
 3. Inventory legacy rows using counts and relationship checks, without
    exporting media or credentials.
 4. Backfill users and playlists, then map legacy track rows to catalog tracks,
