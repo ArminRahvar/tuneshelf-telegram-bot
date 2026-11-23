@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 
 from archive import PersonalMusicArchive, TelegramMessageReference, TrackMetadata
+from app.database.runtime import RuntimeDatabase
 from database import Database
 from musicbrainz import MusicBrainzError, MusicBrainzProvider, RecordingMetadata
 from telegram_delivery import TelegramDeliveryService
@@ -159,7 +160,7 @@ def _show_library(
     page: int = 0,
 ) -> None:
     page = max(0, page)
-    tracks = database.list_library(
+    tracks = database.library_repository.list_library(
         user_id, SEARCH_RESULTS_PER_PAGE + 1, page * SEARCH_RESULTS_PER_PAGE
     )
     has_next = len(tracks) > SEARCH_RESULTS_PER_PAGE
@@ -195,7 +196,7 @@ def _show_statistics(
     api: TelegramAPI,
     message_id: int | None,
 ) -> None:
-    stats = database.get_statistics(user_id)
+    stats = database.library_repository.get_statistics(user_id)
     lines = [
         "📊 Your archive statistics",
         f"Saved tracks: {stats['total_tracks']}",
@@ -246,16 +247,16 @@ def _show_track_detail(
     api: TelegramAPI,
     message_id: int | None,
 ) -> None:
-    track = database.get_track(user_id, track_id)
+    track = database.library_repository.get_track(user_id, track_id)
     if track is None:
         _show_library(user_id, chat_id, database, api, message_id)
         return
-    tags = database.list_track_tags(user_id, track_id) or []
-    references = database.list_message_references(user_id, track_id) or []
+    tags = database.library_repository.list_track_tags(user_id, track_id) or []
+    references = database.library_repository.list_message_references(user_id, track_id) or []
     available_count = sum(bool(reference["is_available"]) for reference in references)
     lines = [
         f"#{track_id} {_format_track(track)}",
-        f"Collection: {track['playlist_name']}",
+        f"Collection: {track['playlist_name'] or 'not in a playlist'}",
         f"Release year: {track['release_year'] or 'unknown'}",
         f"Duration: {track['duration_seconds']} sec"
         if track["duration_seconds"] is not None
@@ -292,7 +293,9 @@ def _show_discovery(
     api: TelegramAPI,
     message_id: int | None,
 ) -> None:
-    suggestions = database.discover_tracks(user_id, SEARCH_RESULTS_PER_PAGE)
+    suggestions = database.library_repository.discover_tracks(
+        user_id, SEARCH_RESULTS_PER_PAGE
+    )
     keyboard = [
         [_button(f"▶ #{track['id']} {_format_track(track)}"[:60], f"search_play:{track['id']}")]
         for track in suggestions
@@ -394,6 +397,7 @@ def _show_playlists(
     source: tuple[int, int] | None = None,
     page: int = 0,
     notice: str | None = None,
+    track_id: int | None = None,
 ) -> None:
     playlists = PersonalMusicArchive(database).list_collections(user_id)
     page_count = max(1, (len(playlists) + PLAYLISTS_PER_PAGE - 1) // PLAYLISTS_PER_PAGE)
@@ -437,6 +441,31 @@ def _show_playlists(
             [_button("Cancel", f"cancel_add:{source_chat_id}:{source_message_id}")]
         )
         text = "Choose where to save this Telegram audio:"
+    elif track_id is not None:
+        for playlist in selected:
+            label = f"{playlist['name']} ({playlist['track_count']})"
+            keyboard.append(
+                [
+                    _button(
+                        label[:64],
+                        f"add_track:{playlist['id']}:{track_id}",
+                    )
+                ]
+            )
+        if page_count > 1:
+            navigation = []
+            if page > 0:
+                navigation.append(
+                    _button("⬅️ Previous", f"track_choose_page:{page - 1}:{track_id}")
+                )
+            if page + 1 < page_count:
+                navigation.append(
+                    _button("Next ➡️", f"track_choose_page:{page + 1}:{track_id}")
+                )
+            keyboard.append(navigation)
+        keyboard.append([_button("➕ Create collection", f"new_track:{track_id}")])
+        keyboard.append([_button("Cancel", f"track:{track_id}")])
+        text = f"Add #{track_id} to a collection (it stays in your library):"
     else:
         for playlist in selected:
             label = f"🎵 {playlist['name']} ({playlist['track_count']})"
@@ -573,7 +602,7 @@ def _show_search_results(
     search_text = " ".join(terms)
     offset = page * SEARCH_RESULTS_PER_PAGE
     if filters["metadata_only"]:
-        results = database.search_metadata_only_tracks(
+        results = database.library_repository.search_metadata_only_tracks(
             user_id,
             search_text,
             SEARCH_RESULTS_PER_PAGE + 1,
@@ -581,7 +610,7 @@ def _show_search_results(
             filters["release_year"],
         )
     else:
-        results = database.search_tracks(
+        results = database.library_repository.search_tracks(
             user_id,
             search_text,
             SEARCH_RESULTS_PER_PAGE + 1,
@@ -619,21 +648,18 @@ def _show_search_results(
 
 def _save_track(
     user_id: int,
-    playlist_id: int,
     source_chat_id: int,
     source_message_id: int,
     database: Database,
     api: TelegramAPI,
     archive_chat_id: int | None = None,
-) -> tuple[str, bool, str | None] | None:
+) -> tuple[int, bool, str | None] | None:
     archive = PersonalMusicArchive(database)
-    playlist = archive.get_collection(user_id, playlist_id)
     pending = database.get_pending_track(user_id, source_chat_id, source_message_id)
-    if playlist is None or pending is None:
+    if pending is None:
         return None
-    saved = archive.save_audio(
+    track_id, saved, _ = archive.save_audio(
         user_id,
-        playlist_id,
         TrackMetadata(
             title=pending["title"],
             performer=pending["performer"],
@@ -656,95 +682,95 @@ def _save_track(
     database.delete_pending_track(user_id, source_chat_id, source_message_id)
     archive_notice = None
     if archive_chat_id is not None:
-        track_id = database.get_track_id_for_source_reference(
-            user_id,
-            playlist_id,
-            source_chat_id,
-            source_message_id,
+        archived = database.find_shared_archive_reference(
+            archive_chat_id,
+            pending["file_unique_id"],
+            pending["musicbrainz_recording_id"],
         )
-        if track_id is None:
-            LOGGER.error(
-                "Saved track has no source reference: user=%s playlist=%s message=%s",
-                user_id,
-                playlist_id,
-                source_message_id,
-            )
-            archive_notice = (
-                "The track was added, but its shared archive copy could not be linked."
-            )
-        else:
-            archived = database.find_shared_archive_reference(
-                archive_chat_id,
-                pending["file_unique_id"],
-            )
-            if archived is None:
-                try:
-                    result = api.call(
-                        "copyMessage",
-                        chat_id=archive_chat_id,
-                        from_chat_id=source_chat_id,
-                        message_id=source_message_id,
+        if archived is None:
+            try:
+                result = api.call(
+                    "copyMessage",
+                    chat_id=archive_chat_id,
+                    from_chat_id=source_chat_id,
+                    message_id=source_message_id,
+                )
+                archive_message_id = (
+                    result.get("message_id") if isinstance(result, dict) else None
+                )
+                if (
+                    not isinstance(archive_message_id, int)
+                    or isinstance(archive_message_id, bool)
+                    or archive_message_id < 1
+                ):
+                    raise TelegramAPIError(
+                        "Telegram did not return a valid archived message ID."
                     )
-                    archive_message_id = (
-                        result.get("message_id") if isinstance(result, dict) else None
-                    )
-                    if (
-                        not isinstance(archive_message_id, int)
-                        or isinstance(archive_message_id, bool)
-                        or archive_message_id < 1
-                    ):
-                        raise TelegramAPIError(
-                            "Telegram did not return a valid archived message ID."
-                        )
-                except TelegramAPIError as error:
+            except TelegramAPIError as error:
+                LOGGER.warning(
+                    "Could not copy track %s to the shared archive: %s",
+                    track_id,
+                    error,
+                )
+                archive_notice = (
+                    "The track was added, but could not be copied to the shared "
+                    "archive. Its original message remains available."
+                )
+            else:
+                asset_saved = database.save_shared_archive_asset(
+                    archive_chat_id,
+                    archive_message_id,
+                    pending["file_unique_id"],
+                    pending["media_type"],
+                    telegram_file_id=pending["telegram_file_id"],
+                    original_filename=pending["original_filename"],
+                    title=pending["title"],
+                    performer=pending["performer"],
+                    release_title=pending["release_title"],
+                    duration_seconds=pending["duration_seconds"],
+                    musicbrainz_recording_id=pending["musicbrainz_recording_id"],
+                    release_year=pending["release_year"],
+                )
+                if not asset_saved:
                     LOGGER.warning(
-                        "Could not copy track %s to the shared archive: %s",
+                        "Archived track %s was copied but not registered",
                         track_id,
-                        error,
                     )
                     archive_notice = (
-                        "The track was added, but could not be copied to the shared "
-                        "archive. Its original message remains available."
+                        "The archive copy is available, but its reference could "
+                        "not be recorded."
                     )
-                else:
-                    asset_saved = database.save_shared_archive_asset(
-                        archive_chat_id,
-                        archive_message_id,
-                        pending["file_unique_id"],
-                        pending["media_type"],
-                        telegram_file_id=pending["telegram_file_id"],
-                        original_filename=pending["original_filename"],
-                    )
-                    if not asset_saved:
-                        LOGGER.warning(
-                            "Archived track %s has no Telegram file_unique_id; "
-                            "shared duplicate detection is unavailable",
-                            track_id,
-                        )
-                        archive_notice = (
-                            "The archive copy is available, but Telegram did not "
-                            "provide a file ID for future duplicate detection."
-                        )
-                    database.add_message_reference(
-                        user_id,
+                elif not pending["file_unique_id"] and not pending[
+                    "musicbrainz_recording_id"
+                ]:
+                    LOGGER.warning(
+                        "Archived track %s has no stable duplicate identifier",
                         track_id,
-                        archive_chat_id,
-                        archive_message_id,
-                        pending["media_type"],
-                        file_unique_id=pending["file_unique_id"],
-                        original_filename=pending["original_filename"],
                     )
-            else:
-                database.add_message_reference(
+                    archive_notice = (
+                        "The archive copy is available, but no stable identifier "
+                        "was found for future duplicate detection."
+                    )
+                database.library_repository.add_message_reference(
                     user_id,
                     track_id,
-                    int(archived["archive_chat_id"]),
-                    int(archived["archive_message_id"]),
-                    archived["media_type"],
-                    file_unique_id=archived["telegram_file_unique_id"],
-                    original_filename=archived["original_filename"],
+                    archive_chat_id,
+                    archive_message_id,
+                    pending["media_type"],
+                    file_unique_id=pending["file_unique_id"],
+                    original_filename=pending["original_filename"],
                 )
-    return playlist["name"], saved, archive_notice
+        else:
+            database.library_repository.add_message_reference(
+                user_id,
+                track_id,
+                int(archived["archive_chat_id"]),
+                int(archived["archive_message_id"]),
+                archived["media_type"],
+                file_unique_id=archived["telegram_file_unique_id"],
+                original_filename=archived["original_filename"],
+            )
+    return track_id, saved, archive_notice
 
 
 def _deliver_track(
@@ -793,11 +819,15 @@ def _deliver_track(
                     "Telegram is rate limiting delivery. Please retry this track later.",
                 )
                 return False
-            database.mark_message_reference_verified(user_id, reference["id"])
+            database.library_repository.mark_message_reference_available(
+                user_id, reference["id"]
+            )
             return True
         LOGGER.error("Telegram could not deliver track %s: %s", track["id"], error)
         if error.error_code in (400, 403):
-            database.mark_message_reference_unavailable(user_id, reference["id"])
+            database.library_repository.mark_message_reference_unavailable(
+                user_id, reference["id"]
+            )
             api.send_message(
                 chat_id,
                 f"Telegram could not retrieve {_format_track(track)} from that source message. "
@@ -810,7 +840,9 @@ def _deliver_track(
                 f"Could not retrieve {_format_track(track)} right now. Please try again later.",
             )
         return False
-    database.mark_message_reference_verified(user_id, reference["id"])
+    database.library_repository.mark_message_reference_available(
+        user_id, reference["id"]
+    )
     return True
 
 
@@ -887,7 +919,7 @@ def handle_message(
         except ValueError:
             api.send_message(chat_id, "Usage: /link <your-track-id>")
             return
-        if database.get_track(user_id, track_id) is None:
+        if database.library_repository.get_track(user_id, track_id) is None:
             api.send_message(chat_id, "That track is not in your personal library.")
             return
         database.set_user_state(user_id, f"link:{track_id}")
@@ -954,7 +986,7 @@ def handle_message(
         except ValueError:
             api.send_message(chat_id, "Usage: /track <your-track-id>")
             return
-        track = database.get_track(user_id, track_id)
+        track = database.library_repository.get_track(user_id, track_id)
         if track is None:
             api.send_message(chat_id, "That track is not in your personal library.")
             return
@@ -966,7 +998,7 @@ def handle_message(
         except ValueError:
             api.send_message(chat_id, "Usage: /play <your-track-id>")
             return
-        track = database.get_track(user_id, track_id)
+        track = database.library_repository.get_track(user_id, track_id)
         if track is None:
             api.send_message(chat_id, "That track is not in your personal library.")
             return
@@ -1017,7 +1049,7 @@ def handle_message(
         )
         return
     if command == "/metadata":
-        rows = database.list_metadata_only_tracks(user_id)
+        rows = database.library_repository.list_metadata_only_tracks(user_id)
         if not rows:
             api.send_message(chat_id, "No metadata-only tracks saved yet.")
         else:
@@ -1054,7 +1086,9 @@ def handle_message(
         except ValueError:
             api.send_message(chat_id, "Usage: /deletemetadata <your-metadata-track-id>")
             return
-        deleted = database.delete_metadata_only_track(user_id, track_id)
+        deleted = database.library_repository.delete_metadata_only_track(
+            user_id, track_id
+        )
         api.send_message(
             chat_id,
             "Metadata-only track removed."
@@ -1104,7 +1138,7 @@ def handle_message(
             database.clear_user_state(user_id)
             api.send_message(chat_id, "That track association expired. Use /link again.")
             return
-        if database.get_track(user_id, track_id) is None:
+        if database.library_repository.get_track(user_id, track_id) is None:
             database.clear_user_state(user_id)
             api.send_message(chat_id, "That track is not in your library.")
             return
@@ -1118,7 +1152,7 @@ def handle_message(
             _mime_type,
             original_filename,
         ) = details
-        added = database.add_message_reference(
+        added = database.library_repository.add_message_reference(
             user_id,
             track_id,
             chat_id,
@@ -1193,17 +1227,70 @@ def handle_message(
             original_filename,
             release_year,
         )
-        _show_playlists(
+        save_result = _save_track(
             user_id,
             chat_id,
+            source_message_id,
             database,
             api,
-            source=(chat_id, source_message_id),
-            notice=metadata_notice,
+            archive_chat_id,
+        )
+        if save_result is None:
+            api.send_message(chat_id, "The audio could not be saved. Please send it again.")
+            return
+        track_id, saved, archive_notice = save_result
+        status = (
+            f"✅ Saved to your library as #{track_id}."
+            if saved
+            else f"This audio is already in your library as #{track_id}."
+        )
+        for notice in (metadata_notice, archive_notice):
+            if notice:
+                status += f"\n{notice}"
+        if archive_chat_id is not None and archive_notice is None:
+            status += "\nAvailable from the shared archive."
+        _edit_or_send(
+            api,
+            chat_id,
+            status,
+            [
+                [_button("➕ Add to a collection", f"library_add:{track_id}")],
+                [_button("📚 My Library", "library")],
+                [_button("⬅️ Main menu", "home")],
+            ],
         )
         return
 
     if not text or text.startswith("/"):
+        return
+    if state is not None and state.startswith("create_track:"):
+        try:
+            track_id = int(state.split(":", maxsplit=1)[1])
+        except ValueError:
+            database.clear_user_state(user_id)
+            api.send_message(chat_id, "That collection action expired.")
+            return
+        playlist_name = text.strip()
+        if not playlist_name or len(playlist_name) > 64:
+            api.send_message(chat_id, "Collection names must contain 1–64 characters. Try again.")
+            return
+        archive = PersonalMusicArchive(database)
+        if not archive.create_collection(user_id, playlist_name):
+            api.send_message(chat_id, f"“{playlist_name}” already exists.")
+            return
+        playlist = next(
+            row
+            for row in archive.list_collections(user_id)
+            if row["name"] == playlist_name
+        )
+        added = archive.add_to_collection(user_id, track_id, int(playlist["id"]))
+        database.clear_user_state(user_id)
+        api.send_message(
+            chat_id,
+            f"Added #{track_id} to “{playlist_name}”."
+            if added
+            else f"Created “{playlist_name}”, but the track could not be added.",
+        )
         return
     if state is not None and state.startswith("create"):
         playlist_name = text.strip()
@@ -1254,7 +1341,7 @@ def handle_message(
                 database.clear_user_state(user_id)
                 api.send_message(chat_id, "That track action expired. Please open the track again.")
                 return
-            if database.get_track(user_id, track_id) is None:
+            if database.library_repository.get_track(user_id, track_id) is None:
                 database.clear_user_state(user_id)
                 api.send_message(chat_id, "That track is not in your personal library.")
                 return
@@ -1468,6 +1555,45 @@ def handle_callback(
         _show_library(user_id, chat_id, database, api, message_id)
     elif action == "library_page" and len(parts) == 2:
         _show_library(user_id, chat_id, database, api, message_id, int(parts[1]))
+    elif action == "library_add" and len(parts) == 2:
+        track_id = int(parts[1])
+        if database.library_repository.get_track(user_id, track_id) is None:
+            _show_library(user_id, chat_id, database, api, message_id)
+        else:
+            _show_playlists(
+                user_id,
+                chat_id,
+                database,
+                api,
+                message_id,
+                track_id=track_id,
+            )
+    elif action == "track_choose_page" and len(parts) == 3:
+        _show_playlists(
+            user_id,
+            chat_id,
+            database,
+            api,
+            message_id,
+            page=int(parts[1]),
+            track_id=int(parts[2]),
+        )
+    elif action == "add_track" and len(parts) == 3:
+        playlist_id, track_id = map(int, parts[1:])
+        if PersonalMusicArchive(database).add_to_collection(
+            user_id, track_id, playlist_id
+        ):
+            _show_playlist(user_id, chat_id, playlist_id, database, api, message_id)
+        else:
+            _show_playlists(
+                user_id,
+                chat_id,
+                database,
+                api,
+                message_id,
+                track_id=track_id,
+                notice="The track could not be added to that collection.",
+            )
     elif action == "discover":
         _show_discovery(user_id, chat_id, database, api, message_id)
     elif action == "stats":
@@ -1483,7 +1609,7 @@ def handle_callback(
         )
     elif action in {"rate_track", "note_track", "tag_track", "edit_track", "link_track"} and len(parts) == 2:
         track_id = int(parts[1])
-        if database.get_track(user_id, track_id) is None:
+        if database.library_repository.get_track(user_id, track_id) is None:
             _show_library(user_id, chat_id, database, api, message_id)
             return
         if action == "link_track":
@@ -1506,7 +1632,9 @@ def handle_callback(
         )
     elif action == "metadata_info" and len(parts) == 2:
         track_id = int(parts[1])
-        metadata_tracks = database.list_metadata_only_tracks(user_id)
+        metadata_tracks = database.library_repository.list_metadata_only_tracks(
+            user_id
+        )
         track = next((row for row in metadata_tracks if row["id"] == track_id), None)
         if track is None:
             _show_home(api, chat_id, message_id, "That metadata-only track is unavailable.")
@@ -1585,7 +1713,7 @@ def handle_callback(
                 user_id, chat_id, query, int(parts[1]), database, api, message_id
             )
     elif action == "search_play" and len(parts) == 2:
-        track = database.get_track(user_id, int(parts[1]))
+        track = database.library_repository.get_track(user_id, int(parts[1]))
         if track is None:
             _show_home(api, chat_id, message_id, "That track is no longer available.")
         else:
@@ -1619,6 +1747,19 @@ def handle_callback(
             [[_button("Cancel", "home")]],
             message_id,
         )
+    elif action == "new_track" and len(parts) == 2:
+        track_id = int(parts[1])
+        if database.library_repository.get_track(user_id, track_id) is None:
+            _show_library(user_id, chat_id, database, api, message_id)
+            return
+        database.set_user_state(user_id, f"create_track:{track_id}")
+        _edit_or_send(
+            api,
+            chat_id,
+            "Send the new collection name (1–64 characters).",
+            [[_button("Cancel", f"track:{track_id}")]],
+            message_id,
+        )
     elif action == "open" and len(parts) == 2:
         _clear_interaction_state(database, user_id)
         _show_playlist(user_id, chat_id, int(parts[1]), database, api, message_id)
@@ -1644,7 +1785,6 @@ def handle_callback(
         playlist_id, source_chat_id, source_message_id = map(int, parts[1:])
         save_result = _save_track(
             user_id,
-            playlist_id,
             source_chat_id,
             source_message_id,
             database,
@@ -1660,11 +1800,22 @@ def handle_callback(
                 message_id,
             )
         else:
-            playlist_name, saved, archive_notice = save_result
+            track_id, saved, archive_notice = save_result
+            added_to_playlist = PersonalMusicArchive(database).add_to_collection(
+                user_id, track_id, playlist_id
+            )
+            playlist = PersonalMusicArchive(database).get_collection(
+                user_id, playlist_id
+            )
             status = (
-                f"✅ Added the audio to “{playlist_name}”."
-                if saved
-                else f"That audio is already in “{playlist_name}”."
+                f"✅ Saved to your library and added to "
+                f"“{playlist['name'] if playlist else 'the collection'}”."
+                if saved and added_to_playlist
+                else (
+                    "The audio is in your library, but was already in that collection."
+                    if not added_to_playlist
+                    else f"Added the existing library track #{track_id} to the collection."
+                )
             )
             if archive_chat_id is not None and archive_notice is None:
                 status += "\nAvailable from the shared archive."
@@ -1766,10 +1917,12 @@ def run() -> None:
     if database_url:
         from postgres_database import PostgresDatabase
 
-        database = PostgresDatabase(database_url)
+        database = RuntimeDatabase(PostgresDatabase(database_url))
         LOGGER.info("Using PostgreSQL archive database")
     else:
-        database = Database(os.environ.get("DATABASE_PATH", "playlist_bot.sqlite3"))
+        database = RuntimeDatabase(
+            Database(os.environ.get("DATABASE_PATH", "playlist_bot.sqlite3"))
+        )
         LOGGER.info("Using SQLite archive database")
     api = TelegramAPI(token)
     if archive_chat_id is None:

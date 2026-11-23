@@ -184,6 +184,11 @@ class ArchiveAsset(Base):
             "archive_message_id",
             name="uq_archive_asset_message",
         ),
+        UniqueConstraint(
+            "archive_chat_id",
+            "telegram_file_unique_id",
+            name="uq_archive_asset_file",
+        ),
         CheckConstraint(
             "archive_message_id > 0",
             name="ck_archive_asset_message_id",
@@ -193,15 +198,16 @@ class ArchiveAsset(Base):
     )
 
     id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True, autoincrement=True)
-    track_id: Mapped[int] = mapped_column(
+    track_id: Mapped[int | None] = mapped_column(
         ID_TYPE,
         ForeignKey("catalog_tracks.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     archive_chat_id: Mapped[int] = mapped_column(ID_TYPE, nullable=False)
     archive_message_id: Mapped[int] = mapped_column(ID_TYPE, nullable=False)
     telegram_file_id: Mapped[str | None] = mapped_column(Text)
     telegram_file_unique_id: Mapped[str | None] = mapped_column(Text)
+    original_filename: Mapped[str | None] = mapped_column(Text)
     media_type: Mapped[str] = mapped_column(String(32), nullable=False)
     is_available: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=true()
@@ -360,6 +366,33 @@ class UserTrackNote(Base):
     user_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
     track_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
     note: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+
+class UserTrackMetadata(Base):
+    __tablename__ = "user_track_metadata"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "track_id"],
+            ["library_entries.user_id", "library_entries.track_id"],
+            ondelete="CASCADE",
+            name="fk_user_track_metadata_library_entry",
+        ),
+        CheckConstraint(
+            "length(trim(title)) > 0",
+            name="ck_user_track_metadata_title_nonempty",
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
+    track_id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    performer: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

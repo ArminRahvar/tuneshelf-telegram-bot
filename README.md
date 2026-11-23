@@ -5,6 +5,7 @@ A private-chat Telegram bot for organizing a personal music archive. Audio remai
 ## Features
 
 - Save Telegram audio messages, voice messages, and audio MIME-type documents with their original chat/message reference.
+- Save each submission to the private library immediately; adding it to a collection is optional. Removing a track from a collection leaves it in the library.
 - Optionally copy new submissions to a private Telegram archive channel; reuse an available archived message for matching Telegram `file_unique_id` values and prefer it for playback.
 - Preserve Telegram file identifiers and available title, artist, duration, MIME type, and filename metadata. `file_unique_id` is used only as a duplicate hint; it is not used for playback.
 - Keep multiple source-message references per saved track, mark failed references unavailable without deleting metadata, and use `/link` to associate another Telegram copy with a saved track.
@@ -44,17 +45,27 @@ export DATABASE_URL='postgresql://playlist_bot:password@localhost:5432/playlist_
 python3 bot.py
 ```
 
-The PostgreSQL database/user must already exist. The bot applies its idempotent schema setup at startup. SQLite schema migrations use `PRAGMA user_version` and are also applied automatically.
+The PostgreSQL database/user must already exist. At startup, the bot applies
+its idempotent legacy schema setup followed by Alembic migrations. Existing
+legacy library rows are imported into the normalized tables in-place before
+the bot switches library operations to them. Legacy tables are kept intact.
+This startup import does not transfer data between a SQLite database and a
+different PostgreSQL database.
 
-Setting `DATABASE_URL` switches backends; existing SQLite data is not copied automatically. Keep a backup and migrate/export any existing SQLite library before switching a populated installation to PostgreSQL.
+Setting `DATABASE_URL` switches backends; existing SQLite data is not copied
+automatically. Use the explicit backfill procedure below to transfer data to a
+different backend, and keep a verified backup.
 
-The normalized SQLAlchemy model is introduced additively and is not yet used by the bot repositories. To create its schema explicitly, set `DATABASE_URL` to the target database and run:
+To apply the normalized schema without starting the bot, set `DATABASE_URL`
+to the target database and run:
 
 ```sh
 DATABASE_URL='sqlite:////absolute/path/to/playlist_bot.sqlite3' python3 -m alembic upgrade head
 ```
 
-This adds the new catalog/library tables while keeping the legacy tables intact.
+This adds the normalized tables and imports legacy shared archive assets while
+keeping the legacy tables intact. The personal-library import is performed by
+the bot at startup when legacy library rows exist.
 
 Before planning a backfill, inspect the current database without modifying it:
 
@@ -124,14 +135,14 @@ Keep `.env` private. The CI workflow runs unit tests and builds the container im
 ## Data model and access control
 
 - Telegram user IDs are the external user identity. PostgreSQL stores them as `BIGINT`; SQLite's signed 64-bit integer supports the same values.
-- Playlists/collections and their tracks are owner-scoped. Every read, update, deletion, rating, note, tag, and reference lookup verifies ownership through the playlist/user relationship.
-- `telegram_message_references` stores message IDs, chat IDs, media descriptors, and availability state. A track may have multiple references; the same audio `file_unique_id` in a collection is attached as another reference instead of creating a duplicate entry.
-- Track ratings, notes, and tags are user-private. Tags are owner-scoped and are included in that user's library search only.
+- Library membership, playlists, and playlist items are owner-scoped. Every read, update, deletion, rating, note, tag, and reference lookup verifies library ownership; a track may be in the library without belonging to any playlist.
+- `telegram_source_references` stores message IDs, chat IDs, media descriptors, and availability state. A track may have multiple references; an exact Telegram file unique ID or MusicBrainz recording ID can reuse an existing catalog track without title-only matching.
+- Track metadata overrides, ratings, notes, and tags are user-private. Tags are owner-scoped and are included in that user's library search only.
 - Provider-only results are stored separately as metadata-only records and never acquire a fabricated Telegram reference. Sending the audio later adds a playable library track; it does not automatically merge the metadata-only record.
 - Copying does not expose source attribution. `TelegramDeliveryService` can be configured to use forwarding instead. The original source message must remain accessible to the bot; Telegram privacy, channel permissions, deletion, and Bot API restrictions may prevent retrieval. References are not guaranteed to work forever.
 - Shared archive support is optional and stores archive locations separately from user tracks; it does not download media or store audio binaries. Archived messages are deduplicated by Telegram `file_unique_id` within this bot's database, and remain registered when a user's track is removed.
 
-The normalized application service in `archive.py` depends on a repository protocol, not Telegram update objects. Telegram-specific polling and delivery are in `bot.py` and `telegram_delivery.py`; persistence adapters are in `database.py` and `postgres_database.py`.
+The application service in `archive.py` depends on a repository protocol, not Telegram update objects. `app/database/runtime.py` routes library and playlist workflows to the normalized `LibraryRepository`; legacy adapters retain transient bot state and compatibility tables. Telegram-specific polling and delivery are in `bot.py` and `telegram_delivery.py`.
 
 ## Architecture and roadmap
 

@@ -1,7 +1,10 @@
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from app.database.library_repository import LibraryRepository
 
 
 class PlaylistNotFoundError(Exception):
@@ -11,7 +14,32 @@ class PlaylistNotFoundError(Exception):
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
+        self._database_url: str | None = None
+        self._library_repository = None
         self.migrate()
+        if self.path != ":memory:":
+            from sqlalchemy.engine import URL
+
+            from app.database.migrations import backfill_legacy_library, upgrade_schema
+
+            self._database_url = URL.create(
+                "sqlite",
+                database=str(Path(self.path).resolve()),
+            ).render_as_string(hide_password=False)
+            upgrade_schema(self._database_url)
+            backfill_legacy_library(self._database_url)
+
+    @property
+    def library_repository(self) -> "LibraryRepository":
+        if self._database_url is None:
+            raise RuntimeError(
+                "The normalized library requires a file-backed SQLite database."
+            )
+        if self._library_repository is None:
+            from app.database.library_repository import LibraryRepository
+
+            self._library_repository = LibraryRepository(self._database_url)
+        return self._library_repository
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -1001,22 +1029,88 @@ class Database:
         self,
         archive_chat_id: int,
         file_unique_id: str | None,
+        musicbrainz_recording_id: str | None = None,
     ) -> sqlite3.Row | None:
-        if not file_unique_id:
+        if not file_unique_id and not musicbrainz_recording_id:
             return None
         with self._connection() as connection:
             return connection.execute(
                 """
-                SELECT archive_chat_id, archive_message_id, media_type,
-                       telegram_file_unique_id, telegram_file_id,
-                       original_filename
-                FROM telegram_archive_assets
-                WHERE archive_chat_id = ? AND telegram_file_unique_id = ?
-                  AND is_available = 1
+                SELECT asset.archive_chat_id, asset.archive_message_id,
+                       asset.media_type, asset.telegram_file_unique_id,
+                       asset.telegram_file_id, asset.original_filename
+                FROM archive_assets AS asset
+                LEFT JOIN catalog_tracks AS track ON track.id = asset.track_id
+                WHERE asset.archive_chat_id = ? AND asset.is_available = 1
+                  AND (
+                    (? IS NOT NULL AND asset.telegram_file_unique_id = ?)
+                    OR (? IS NOT NULL AND track.musicbrainz_recording_id = ?)
+                  )
+                ORDER BY CASE
+                    WHEN ? IS NOT NULL AND asset.telegram_file_unique_id = ? THEN 0
+                    ELSE 1
+                END, asset.id
                 LIMIT 1
                 """,
-                (archive_chat_id, file_unique_id),
+                (
+                    archive_chat_id,
+                    file_unique_id,
+                    file_unique_id,
+                    musicbrainz_recording_id,
+                    musicbrainz_recording_id,
+                    file_unique_id,
+                    file_unique_id,
+                ),
             ).fetchone()
+
+    def _create_catalog_track(
+        self,
+        connection: sqlite3.Connection,
+        title: str,
+        performer: str | None,
+        release_title: str | None,
+        duration_seconds: int | None,
+        musicbrainz_recording_id: str | None,
+        release_year: int | None,
+    ) -> int:
+        album_id = None
+        if release_title and release_title.strip():
+            album_cursor = connection.execute(
+                "INSERT INTO albums (title, release_year) VALUES (?, ?)",
+                (release_title.strip(), release_year),
+            )
+            album_id = album_cursor.lastrowid
+
+        track_cursor = connection.execute(
+            """
+            INSERT INTO catalog_tracks (
+                title, album_id, duration_seconds, musicbrainz_recording_id,
+                release_year
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                title.strip(),
+                album_id,
+                duration_seconds,
+                musicbrainz_recording_id,
+                release_year,
+            ),
+        )
+        track_id = int(track_cursor.lastrowid)
+
+        if performer and performer.strip():
+            artist_cursor = connection.execute(
+                "INSERT INTO artists (name) VALUES (?)",
+                (performer.strip(),),
+            )
+            connection.execute(
+                """
+                INSERT INTO catalog_track_artists (track_id, artist_id, position)
+                VALUES (?, ?, 0)
+                """,
+                (track_id, artist_cursor.lastrowid),
+            )
+        return track_id
 
     def save_shared_archive_asset(
         self,
@@ -1026,35 +1120,112 @@ class Database:
         media_type: str,
         telegram_file_id: str | None = None,
         original_filename: str | None = None,
+        title: str | None = None,
+        performer: str | None = None,
+        release_title: str | None = None,
+        duration_seconds: int | None = None,
+        musicbrainz_recording_id: str | None = None,
+        release_year: int | None = None,
     ) -> bool:
-        if not file_unique_id:
-            return False
         with self._connection() as connection:
-            cursor = connection.execute(
+            if file_unique_id:
+                connection.execute(
+                    """
+                    INSERT INTO archive_assets (
+                        track_id, archive_chat_id, archive_message_id,
+                        telegram_file_unique_id, telegram_file_id, media_type,
+                        original_filename
+                    ) VALUES (NULL, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(archive_chat_id, telegram_file_unique_id) DO UPDATE SET
+                        archive_message_id = excluded.archive_message_id,
+                        telegram_file_id = excluded.telegram_file_id,
+                        media_type = excluded.media_type,
+                        original_filename = excluded.original_filename,
+                        is_available = 1,
+                        last_verified_at = NULL
+                    """,
+                    (
+                        archive_chat_id,
+                        archive_message_id,
+                        file_unique_id,
+                        telegram_file_id,
+                        media_type,
+                        original_filename,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO archive_assets (
+                        track_id, archive_chat_id, archive_message_id,
+                        telegram_file_id, media_type, original_filename
+                    ) VALUES (NULL, ?, ?, ?, ?, ?)
+                    ON CONFLICT(archive_chat_id, archive_message_id) DO UPDATE SET
+                        telegram_file_id = excluded.telegram_file_id,
+                        media_type = excluded.media_type,
+                        original_filename = excluded.original_filename,
+                        is_available = 1,
+                        last_verified_at = NULL
+                    """,
+                    (
+                        archive_chat_id,
+                        archive_message_id,
+                        telegram_file_id,
+                        media_type,
+                        original_filename,
+                    ),
+                )
+            row = connection.execute(
                 """
-                INSERT INTO telegram_archive_assets (
-                    telegram_file_unique_id, archive_chat_id, archive_message_id,
-                    telegram_file_id, media_type, original_filename
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(telegram_file_unique_id) DO UPDATE SET
-                    archive_chat_id = excluded.archive_chat_id,
-                    archive_message_id = excluded.archive_message_id,
-                    telegram_file_id = excluded.telegram_file_id,
-                    media_type = excluded.media_type,
-                    original_filename = excluded.original_filename,
-                    is_available = 1,
-                    last_verified_at = NULL
+                SELECT id, track_id
+                FROM archive_assets
+                WHERE archive_chat_id = ?
+                  AND (
+                    (? IS NOT NULL AND telegram_file_unique_id = ?)
+                    OR (? IS NULL AND archive_message_id = ?)
+                  )
                 """,
                 (
-                    file_unique_id,
                     archive_chat_id,
+                    file_unique_id,
+                    file_unique_id,
+                    file_unique_id,
                     archive_message_id,
-                    telegram_file_id,
-                    media_type,
-                    original_filename,
                 ),
-            )
-            return cursor.rowcount == 1
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("The shared archive asset was not persisted.")
+            if row["track_id"] is None:
+                track = None
+                if musicbrainz_recording_id:
+                    track = connection.execute(
+                        """
+                        SELECT id FROM catalog_tracks
+                        WHERE musicbrainz_recording_id = ?
+                        ORDER BY id LIMIT 1
+                        """,
+                        (musicbrainz_recording_id,),
+                    ).fetchone()
+                if track is not None:
+                    track_id = int(track["id"])
+                elif title and title.strip():
+                    track_id = self._create_catalog_track(
+                        connection,
+                        title,
+                        performer,
+                        release_title,
+                        duration_seconds,
+                        musicbrainz_recording_id,
+                        release_year,
+                    )
+                else:
+                    track_id = None
+                if track_id is not None:
+                    connection.execute(
+                        "UPDATE archive_assets SET track_id = ? WHERE id = ? AND track_id IS NULL",
+                        (track_id, row["id"]),
+                    )
+            return True
 
     def get_available_message_reference(
         self,
@@ -1131,7 +1302,7 @@ class Database:
             )
             connection.execute(
                 """
-                UPDATE telegram_archive_assets
+                UPDATE archive_assets
                 SET is_available = 0
                 WHERE archive_chat_id = ? AND archive_message_id = ?
                 """,
@@ -1165,7 +1336,7 @@ class Database:
             )
             connection.execute(
                 """
-                UPDATE telegram_archive_assets
+                UPDATE archive_assets
                 SET is_available = 1, last_verified_at = CURRENT_TIMESTAMP
                 WHERE archive_chat_id = ? AND archive_message_id = ?
                 """,

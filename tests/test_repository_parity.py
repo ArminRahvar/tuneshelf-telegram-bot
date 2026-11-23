@@ -79,8 +79,70 @@ class RepositoryContractAssertions:
                 "parity-file",
                 "audio",
                 original_filename="parity.mp3",
+                title="Parity archive track",
+                performer="Parity archive artist",
+                release_title="Parity release",
+                duration_seconds=245,
+                musicbrainz_recording_id="parity-recording",
+                release_year=2024,
             )
         )
+        placeholder = "?" if isinstance(repository, Database) else "%s"
+        with repository._connection() as connection:
+            asset = connection.execute(
+                f"""
+                SELECT track_id FROM archive_assets
+                WHERE archive_chat_id = {placeholder}
+                  AND telegram_file_unique_id = {placeholder}
+                """,
+                (archive_chat_id, "parity-file"),
+            ).fetchone()
+            catalog_track = connection.execute(
+                f"""
+                SELECT t.title, a.name AS performer
+                FROM catalog_tracks AS t
+                JOIN catalog_track_artists AS link ON link.track_id = t.id
+                JOIN artists AS a ON a.id = link.artist_id
+                WHERE t.id = {placeholder}
+                """,
+                (asset["track_id"],),
+            ).fetchone()
+        self.assertEqual(catalog_track["title"], "Parity archive track")
+        self.assertEqual(catalog_track["performer"], "Parity archive artist")
+        self.assertEqual(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                "different-file-id",
+                "parity-recording",
+            )["archive_message_id"],
+            902,
+        )
+        self.assertIsNone(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                "different-file-id",
+                "different-recording",
+            )
+        )
+        self.assertTrue(
+            repository.save_shared_archive_asset(
+                archive_chat_id,
+                903,
+                None,
+                "audio",
+                title="Recording without Telegram unique ID",
+                musicbrainz_recording_id="recording-without-file-id",
+            )
+        )
+        self.assertEqual(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                None,
+                "recording-without-file-id",
+            )["archive_message_id"],
+            903,
+        )
+
         self.assertTrue(
             repository.add_message_reference(
                 owner_id,
@@ -264,19 +326,57 @@ class RepositoryContractAssertions:
             repository.set_delivery_mode(owner_id, "download")
 
 
+class NormalizedLibraryContractAssertions:
+    def assert_normalized_library_contract(self, repository) -> None:
+        owner_id = 6201
+        other_user_id = 6202
+        self.assertTrue(repository.create_playlist(owner_id, "Library test"))
+        playlist_id = repository.list_playlists(owner_id)[0]["id"]
+
+        track_id, added, added_to_playlist = repository.add_audio_to_library(
+            owner_id,
+            -1006201,
+            1,
+            "Independent track",
+            "Library artist",
+            "audio",
+            "library-file",
+        )
+        self.assertTrue(added)
+        self.assertFalse(added_to_playlist)
+        self.assertIsNone(repository.get_track(owner_id, track_id)["playlist_id"])
+        self.assertIsNone(repository.get_track(other_user_id, track_id))
+
+        self.assertTrue(
+            repository.add_track_to_collection(owner_id, track_id, playlist_id)
+        )
+        self.assertFalse(
+            repository.add_track_to_collection(owner_id, track_id, playlist_id)
+        )
+        self.assertTrue(
+            repository.remove_track_by_id(owner_id, playlist_id, track_id)
+        )
+        self.assertEqual(repository.list_tracks_by_id(owner_id, playlist_id), [])
+        self.assertIsNotNone(repository.get_track(owner_id, track_id))
+
+
 class SQLiteRepositoryParityTests(
     unittest.TestCase,
     RepositoryContractAssertions,
+    NormalizedLibraryContractAssertions,
 ):
     def test_sqlite_repository_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Database(Path(directory) / "parity.sqlite3")
             self.assert_repository_contract(repository)
+            self.assert_normalized_library_contract(repository.library_repository)
+            repository.library_repository.close()
 
 
 class PostgreSQLRepositoryParityTests(
     unittest.TestCase,
     RepositoryContractAssertions,
+    NormalizedLibraryContractAssertions,
 ):
     @classmethod
     def setUpClass(cls) -> None:
@@ -319,6 +419,8 @@ class PostgreSQLRepositoryParityTests(
         ):
             repository = PostgresDatabase(self.database_url)
             self.assert_repository_contract(repository)
+            self.assert_normalized_library_contract(repository.library_repository)
+            repository.library_repository.close()
 
 
 if __name__ == "__main__":

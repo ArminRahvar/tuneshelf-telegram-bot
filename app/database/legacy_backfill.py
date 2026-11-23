@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.pool import NullPool
@@ -16,6 +16,7 @@ from sqlalchemy.pool import NullPool
 from app.database.engine import create_database_engine
 from app.database.models import (
     Album,
+    ArchiveAsset,
     Artist,
     CatalogTrack,
     CatalogTrackArtist,
@@ -661,6 +662,31 @@ def _import_track(
     return track_id
 
 
+def _link_unambiguous_archive_assets(connection: Connection) -> None:
+    candidates = (
+        select(
+            TelegramSourceReference.telegram_file_unique_id.label("file_unique_id"),
+            func.min(TelegramSourceReference.track_id).label("track_id"),
+        )
+        .where(TelegramSourceReference.telegram_file_unique_id.is_not(None))
+        .group_by(TelegramSourceReference.telegram_file_unique_id)
+        .having(func.count(func.distinct(TelegramSourceReference.track_id)) == 1)
+        .subquery()
+    )
+    assets = connection.execute(
+        select(ArchiveAsset.id, candidates.c.track_id).join(
+            candidates,
+            candidates.c.file_unique_id == ArchiveAsset.telegram_file_unique_id,
+        ).where(ArchiveAsset.track_id.is_(None))
+    )
+    for asset_id, track_id in assets:
+        connection.execute(
+            update(ArchiveAsset)
+            .where(ArchiveAsset.id == asset_id, ArchiveAsset.track_id.is_(None))
+            .values(track_id=track_id)
+        )
+
+
 def _import_snapshot(
     connection: Connection,
     source_key: str,
@@ -831,6 +857,7 @@ def _import_snapshot(
             )
             counts["metadata_tracks_imported"] += 1
 
+    _link_unambiguous_archive_assets(connection)
     return dict(counts)
 
 

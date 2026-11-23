@@ -24,11 +24,13 @@ class ArchiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.repository = Database(Path(self.directory.name) / "archive.sqlite3")
-        self.repository.create_collection(42, "Favorites")
-        self.collection_id = self.repository.list_collections(42)[0]["id"]
-        self.archive = PersonalMusicArchive(self.repository)
+        self.library = self.repository.library_repository
+        self.library.create_playlist(42, "Favorites")
+        self.collection_id = self.library.list_playlists(42)[0]["id"]
+        self.archive = PersonalMusicArchive(self.library)
 
     def tearDown(self) -> None:
+        self.library.close()
         self.directory.cleanup()
 
     def test_application_service_saves_audio_and_personal_annotations(self) -> None:
@@ -49,9 +51,18 @@ class ArchiveTests(unittest.TestCase):
             telegram_file_unique_id="unique-file-id",
         )
 
-        self.assertTrue(self.archive.save_audio(42, self.collection_id, metadata, reference))
-        self.assertFalse(self.archive.save_audio(42, self.collection_id, metadata, reference))
-        track = self.repository.list_tracks_by_id(42, self.collection_id)[0]
+        saved = self.archive.save_audio(
+            42, metadata, reference, collection_id=self.collection_id
+        )
+        duplicate = self.archive.save_audio(
+            42, metadata, reference, collection_id=self.collection_id
+        )
+        self.assertTrue(saved[1])
+        self.assertTrue(saved[2])
+        self.assertEqual(duplicate[0], saved[0])
+        self.assertFalse(duplicate[1])
+        self.assertFalse(duplicate[2])
+        track = self.library.list_tracks_by_id(42, self.collection_id)[0]
         self.assertEqual(track["telegram_file_id"], "reusable-file-id")
         self.assertEqual(track["duration_seconds"], 180)
         self.assertTrue(self.archive.set_rating(42, track["id"], 4))
@@ -74,8 +85,8 @@ class ArchiveTests(unittest.TestCase):
             "https://musicbrainz.org/recording/example",
         )
 
-        self.assertEqual(self.repository.list_metadata_only_tracks(42)[0]["id"], track_id)
-        self.assertEqual(self.repository.list_message_references(42, track_id), None)
+        self.assertEqual(self.library.list_metadata_only_tracks(42)[0]["id"], track_id)
+        self.assertEqual(self.library.list_message_references(42, track_id), [])
 
     def test_collection_operations_are_owner_scoped(self) -> None:
         self.assertTrue(self.archive.create_collection(42, "Road trip"))
@@ -92,9 +103,9 @@ class ArchiveTests(unittest.TestCase):
         self.assertTrue(
             self.archive.save_audio(
                 42,
-                collection_id,
                 TrackMetadata("Track"),
                 TelegramMessageReference(100, 1, "audio"),
+                collection_id=collection_id,
             )
         )
         track = self.archive.list_collection_tracks(42, collection_id)[0]

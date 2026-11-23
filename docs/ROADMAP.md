@@ -12,26 +12,24 @@ tests exist.
 - SQLite schema version 7 and legacy behavior identified.
 - Existing unit tests run successfully: 56 tests on Python 3.13.17.
 
-### Next implementation milestones
+### Implementation status
 
 1. Target ownership constraints are defined in the normalized model: playlist
    items must reference both an owner-matching playlist and the owner's library
    entry.
-2. SQLAlchemy models and an additive Alembic schema are in place. The bot still
-   uses its legacy repositories, and this migration does not backfill data.
-3. Read-only legacy inventory and a dry-run-by-default SQLite/PostgreSQL
-   backfill tool are implemented. The importer records fingerprints and ID
-   mappings, preserves user data and playlist order, and applies each import
-   transactionally. Keep current adapters until parity is established.
-4. Add a shared SQLite/PostgreSQL repository contract. The tests exercise it
-   locally on SQLite and in a PostgreSQL-backed CI job; fix behavioral
-   differences before switching runtime workflows.
-5. Continue extracting library/playlist use cases from `bot.py` behind
-   repository/service interfaces without changing Telegram UX. Audio saves,
-   metadata saves, collection copying and management, personal annotations/tags,
-   and delivery preferences now use the application service. Search, playback,
-   and transient interaction-state flows remain to be extracted.
-6. Switch individual workflows only after their backend parity tests pass.
+2. The additive Alembic schema and read-only inventory are in place. Startup
+   imports existing personal-library rows in-place while preserving legacy
+   tables.
+3. The explicit SQLite/PostgreSQL transfer backfill records fingerprints and
+   ID mappings, preserves user data and playlist order, and applies each import
+   transactionally.
+4. SQLite and PostgreSQL repository contracts cover the normalized library
+   boundary; PostgreSQL execution runs in CI.
+5. Saves, metadata, playlists, annotations/tags, delivery preferences, search,
+   and playback use application-service or normalized-repository paths.
+   Transient interaction state remains in the legacy adapters.
+6. Core library workflows have switched after repository contract coverage;
+   legacy tables remain for transient state and compatibility during cutover.
 
 **Exit criteria:** legacy data is preserved, user isolation is tested at the
 database and service layers, playlist membership no longer requires duplicate
@@ -46,21 +44,26 @@ track rows, and current bot workflows still pass.
   values across users, and prefer the archive reference during playback.
 - Failures to copy to the channel are surfaced without losing the original
   playable source.
-- Legacy adapters now persist shared archive assets independently from
-  user-owned source-message references and library membership. The normalized
-  `ArchiveAsset` model exists but is not yet the runtime persistence path.
-- Add conservative duplicate matching with stable external IDs first; do not
-  rely on title-only matching.
+- Startup applies additive Alembic migrations, imports legacy archive assets,
+  and runtime adapters now read/write normalized `ArchiveAsset` rows separately
+  from user-owned source-message references. Assets without legacy catalog
+  metadata remain unlinked until a matching submission supplies it.
+- Match duplicates by exact Telegram file unique ID first, then exact
+  MusicBrainz recording ID; never match by title or artist alone.
 - Test the flow with mocked Telegram calls; archive unavailability is tracked
   across references to the same Telegram message.
 
 ## Phase 3 — Personal library and playlists
 
-- Add private library membership independent from playlists.
-- Implement playlist membership, stable ordering/reordering, and duplicate
-  prevention.
-- Keep personal tags, ratings, and notes isolated by user.
-- Add paginated search/filtering and multi-user isolation tests.
+- Audio submissions now create a private library entry by default; adding to a
+  collection is optional. Startup backfills existing legacy libraries in-place
+  and preserves the old tables.
+- Playlist items are separate owner-scoped memberships with stable append
+  ordering and duplicate prevention. Explicit reorder controls remain.
+- Personal title/performer overrides, tags, ratings, and notes are scoped to the
+  owner; removing a playlist item leaves the library entry intact.
+- Normalized library search remains paginated and filterable, with ownership
+  behavior covered by SQLite tests and the PostgreSQL contract used in CI.
 
 ## Phase 4 — Music discovery
 

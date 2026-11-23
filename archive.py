@@ -59,16 +59,17 @@ class ArchiveRepository(Protocol):
         self, user_id: int, playlist_id: int, track_id: int
     ) -> bool: ...
 
-    def add_track_to_playlist(
+    def add_audio_to_library(
         self,
         user_id: int,
-        playlist_id: int,
         source_chat_id: int,
         source_message_id: int,
         title: str,
         performer: str | None,
         media_type: str,
         file_unique_id: str | None,
+        *,
+        playlist_id: int | None = None,
         release_title: str | None = None,
         musicbrainz_recording_id: str | None = None,
         telegram_file_id: str | None = None,
@@ -76,7 +77,7 @@ class ArchiveRepository(Protocol):
         mime_type: str | None = None,
         original_filename: str | None = None,
         release_year: int | None = None,
-    ) -> bool: ...
+    ) -> tuple[int, bool, bool]: ...
 
     def get_available_message_reference(
         self,
@@ -85,18 +86,11 @@ class ArchiveRepository(Protocol):
         preferred_chat_id: int | None = None,
     ) -> Any | None: ...
 
-    def get_track_id_for_source_reference(
-        self,
-        user_id: int,
-        playlist_id: int,
-        source_chat_id: int,
-        source_message_id: int,
-    ) -> int | None: ...
-
     def find_shared_archive_reference(
         self,
         archive_chat_id: int,
         file_unique_id: str | None,
+        musicbrainz_recording_id: str | None = None,
     ) -> Any | None: ...
 
     def add_track_to_collection(
@@ -137,20 +131,17 @@ class PersonalMusicArchive:
     """Application operations enforcing owner-scoped access through the repository."""
 
     def __init__(self, repository: ArchiveRepository) -> None:
-        self.repository = repository
+        self.repository = getattr(repository, "library_repository", repository)
 
     def save_audio(
         self,
         owner_user_id: int,
-        collection_id: int,
         metadata: TrackMetadata,
         reference: TelegramMessageReference,
-    ) -> bool:
-        if self.repository.get_playlist(owner_user_id, collection_id) is None:
-            return False
-        return self.repository.add_track_to_playlist(
+        collection_id: int | None = None,
+    ) -> tuple[int, bool, bool]:
+        return self.repository.add_audio_to_library(
             user_id=owner_user_id,
-            playlist_id=collection_id,
             source_chat_id=reference.source_chat_id,
             source_message_id=reference.source_message_id,
             title=metadata.title.strip(),
@@ -164,6 +155,7 @@ class PersonalMusicArchive:
             mime_type=metadata.mime_type,
             original_filename=metadata.original_filename or reference.original_filename,
             release_year=metadata.release_year,
+            playlist_id=collection_id,
         )
 
     def get_playable_reference(

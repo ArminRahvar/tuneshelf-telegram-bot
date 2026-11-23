@@ -10,35 +10,38 @@ worker process.
 | --- | --- |
 | `bot.py` | Telegram Bot API HTTP calls, long polling, command and callback handling, menus, interaction state, MusicBrainz orchestration, and delivery retries |
 | `archive.py` | Telegram-independent track metadata and message-reference value objects and an application service/repository protocol for collection management, saves, annotations, collection copies, and delivery preferences |
-| `database.py` | SQLite schema migrations and repository operations |
-| `postgres_database.py` | PostgreSQL schema setup and repository operations using psycopg |
+| `database.py` | SQLite legacy schema setup, transient bot state, and shared archive operations |
+| `postgres_database.py` | PostgreSQL legacy schema setup, transient bot state, and shared archive operations |
+| `app/database/runtime.py` | Routes runtime library workflows to the normalized repository while retaining the legacy adapter for compatibility |
+| `app/database/library_repository.py` | Owner-scoped normalized library, playlist, metadata, annotation, and source-reference operations |
 | `telegram_delivery.py` | `copyMessage` versus `forwardMessage` delivery policy |
 | `musicbrainz.py` | Synchronous MusicBrainz recording search, URL lookup, response parsing, throttling, and in-memory caching |
-| `app/database/models.py` | Additive SQLAlchemy model for the normalized catalog, archive, library, playlist, and personal metadata schema |
+| `app/database/models.py` | SQLAlchemy models for the normalized catalog, archive, library, playlist, and personal metadata schema |
 | `app/database/legacy_inventory.py` | Read-only legacy database inventory for migration preflight |
 | `app/database/legacy_backfill.py` | Dry-run-by-default import from a legacy SQLite/PostgreSQL database into the normalized schema |
-| `migrations/` | Explicit Alembic migrations; the initial revision creates the normalized schema without replacing legacy tables |
+| `migrations/` | Additive Alembic migrations applied at startup after legacy schema setup |
 
-`bot.py` still calls the repository directly for search, playback, and
-transient interaction state. Its `archive.py` service handles collection
-listing, lookup, creation, renaming, deletion, track listing and removal, plus
-audio and metadata-only saves, collection copies, personal rating/note/tag
-edits, and delivery preferences. Shared SQLite/PostgreSQL contract tests cover
-common library behavior; the PostgreSQL contract runs in a dedicated CI job.
-Both database adapters implement behavior separately, so remaining workflows
-still need parity coverage before a runtime switch.
+`archive.py` coordinates collection and library operations through the
+normalized repository. `bot.py` retains transient interaction state and
+Telegram orchestration. New audio is added to the user's library first, and
+collection membership is optional. Existing SQLite and PostgreSQL legacy
+library rows are imported in-place at startup before runtime library access;
+the legacy tables remain available for compatibility. The normalized repository
+has SQLite and PostgreSQL contract coverage, with PostgreSQL execution in CI.
 
 When `ARCHIVE_CHAT_ID` is configured, new saved submissions are copied to that
 private Telegram channel. Available archive message references are reused by
 `file_unique_id` across users and preferred during playback. Archive failures
-leave the original source reference usable. The current legacy adapters record
-archive locations in a shared asset table, independently of user-owned
-message references. The normalized `ArchiveAsset` model is not yet the runtime
-persistence path.
+leave the original source reference usable. The adapters record shared archive
+locations in normalized `archive_assets`, separately from user-owned message
+references. New assets link to a normalized catalog track; old archive records
+are imported without inventing track metadata and can be linked when a user
+submits matching audio later.
 
-The bot stores Telegram source-message references and metadata; it does not
-download audio or upload it to a shared archive. Playback copies or forwards
-the original message. Updates are polled and handled synchronously and
+The bot stores Telegram message references and metadata; it does not download
+audio binaries. It uses Telegram's server-side `copyMessage` to place a
+submission in the configured shared archive. Playback copies or forwards the
+original or archived message. Updates are polled and handled synchronously and
 sequentially.
 
 ## Implemented behavior
@@ -58,18 +61,16 @@ sequentially.
 
 ## Important current boundaries
 
-- A saved track belongs to one playlist. Adding it to another playlist creates
-  another track row and copies its metadata, annotations, tags, and message
-  references.
-- The stored Telegram references describe user/source messages, not a
-  centrally managed archive channel.
+- Library membership is independent from playlist membership. Removing a
+  playlist item does not remove its library entry; personal metadata overrides
+  and annotations remain owner-scoped.
+- Stored Telegram source references describe user/source messages; shared
+  archive assets remain separate.
 - `file_unique_id` is a local duplicate hint, not a cross-bot permanent
   identifier.
 - `bot.py` and both database adapters are large modules containing multiple
   responsibilities.
-- The bot repositories still use the legacy SQL implementations; the new
-  SQLAlchemy models and Alembic schema are not yet wired into runtime
-  persistence. There is no ytmusicapi provider,
+- There is no ytmusicapi provider,
   yt-dlp/FFmpeg integration, download queue, or background worker.
 
 ## Target architecture
@@ -93,11 +94,12 @@ providers:
 6. **Workers:** add a PostgreSQL-backed download queue and worker only in the
    download phase; do not introduce Redis/Celery without a demonstrated need.
 
-The shared archive must be represented separately from a track and from a
-user's library membership. A future archive asset should contain the Telegram
-archive chat/message reference and relevant file identifiers. Existing source
-message references must not be relabeled as central archive assets unless they
-are actually copied to the configured archive.
+The shared archive is represented separately from user library membership.
+Archive assets may link to a catalog track when metadata is available and
+contain the Telegram archive chat/message reference and relevant file
+identifiers. Existing source-message references must not be relabeled as
+central archive assets unless they are actually copied to the configured
+archive.
 
 ## Incremental boundaries
 

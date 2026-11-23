@@ -89,6 +89,20 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=_compare_type,
+            include_object=_include_object,
+            render_as_batch=True,
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = create_database_engine(
         _database_url(),
         poolclass=pool.NullPool,

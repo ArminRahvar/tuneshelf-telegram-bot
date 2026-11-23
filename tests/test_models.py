@@ -40,6 +40,136 @@ class ModelMigrationTests(unittest.TestCase):
         ):
             command.upgrade(config, "head")
 
+    def test_database_initialization_applies_alembic_schema(self) -> None:
+        Database(self.database_path)
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            revision = connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        finally:
+            connection.close()
+
+        self.assertEqual(revision, "1f05b6c23d8a")
+        self.assertIn("archive_assets", tables)
+
+    def test_startup_imports_legacy_archive_assets(self) -> None:
+        legacy_database = Database.__new__(Database)
+        legacy_database.path = str(self.database_path)
+        legacy_database.migrate()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO telegram_archive_assets (
+                    telegram_file_unique_id, archive_chat_id, archive_message_id,
+                    telegram_file_id, media_type, original_filename
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("legacy-file", -10012345, 99, "legacy-telegram-id", "audio", "song.mp3"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        config = Config(str(ROOT / "alembic.ini"))
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": f"sqlite:///{self.database_path.as_posix()}"},
+        ):
+            command.upgrade(config, "bc917af50d62")
+
+        Database(self.database_path)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            asset = connection.execute(
+                """
+                SELECT track_id, archive_chat_id, archive_message_id,
+                       telegram_file_unique_id, original_filename
+                FROM archive_assets
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            asset,
+            (None, -10012345, 99, "legacy-file", "song.mp3"),
+        )
+
+        repository = Database(self.database_path)
+        self.assertTrue(
+            repository.save_shared_archive_asset(
+                -10012345,
+                99,
+                "legacy-file",
+                "audio",
+                title="Recovered legacy track",
+                performer="Recovered artist",
+            )
+        )
+        connection = sqlite3.connect(self.database_path)
+        try:
+            linked_asset = connection.execute(
+                """
+                SELECT track_id, archive_message_id
+                FROM archive_assets WHERE telegram_file_unique_id = ?
+                """,
+                ("legacy-file",),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        self.assertIsNotNone(linked_asset[0])
+        self.assertEqual(linked_asset[1], 99)
+
+    def test_startup_backfills_legacy_tracks_into_independent_library(self) -> None:
+        legacy_database = Database.__new__(Database)
+        legacy_database.path = str(self.database_path)
+        legacy_database.migrate()
+        legacy_database.create_playlist(42, "Old favorites")
+        legacy_database.add_track(
+            42,
+            "Old favorites",
+            42,
+            101,
+            "Legacy track",
+            "Legacy artist",
+            "audio",
+            "legacy-file",
+            musicbrainz_recording_id="legacy-recording",
+        )
+
+        upgraded = Database(self.database_path)
+        repository = upgraded.library_repository
+        try:
+            track = repository.list_library(42, 10)[0]
+            self.assertEqual(track["title"], "Legacy track")
+            self.assertEqual(track["playlist_name"], "Old favorites")
+            self.assertTrue(track["is_playable"])
+            self.assertEqual(
+                repository.list_tracks_by_id(
+                    42, int(repository.list_playlists(42)[0]["id"])
+                )[0]["id"],
+                track["id"],
+            )
+        finally:
+            repository.close()
+
+        restarted = Database(self.database_path)
+        repository = restarted.library_repository
+        try:
+            self.assertEqual(len(repository.list_library(42, 10)), 1)
+        finally:
+            repository.close()
+
     def test_fresh_migration_creates_additive_schema_and_downgrade_keeps_users(self) -> None:
         self._upgrade()
         config = Config(str(ROOT / "alembic.ini"))
@@ -60,6 +190,7 @@ class ModelMigrationTests(unittest.TestCase):
                     "user_playlists",
                     "playlist_items",
                     "telegram_source_references",
+                    "user_track_metadata",
                 }.issubset(tables)
             )
             with engine.begin() as connection:

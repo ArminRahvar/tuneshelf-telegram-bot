@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from bot import TelegramAPI, TelegramAPIError, handle_callback, handle_message
+from app.database.runtime import RuntimeDatabase
 from database import Database
 from musicbrainz import MusicBrainzError, RecordingMetadata
 
@@ -30,11 +31,14 @@ class FakeTelegramAPI:
 class BotTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.directory.name) / "test.sqlite3")
+        self.database = RuntimeDatabase(
+            Database(Path(self.directory.name) / "test.sqlite3")
+        )
         self.database.create_playlist(7, "Road Trip")
         self.api = FakeTelegramAPI()
 
     def tearDown(self) -> None:
+        self.database.library_repository.close()
         self.directory.cleanup()
 
     def test_inline_menu_add_and_play_use_original_message_reference(self) -> None:
@@ -52,24 +56,13 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        keyboard = self.api.messages[-1][2]["inline_keyboard"]
-        add_callback = keyboard[0][0]["callback_data"]
-        handle_callback(
-            {
-                "id": "callback-add",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 200},
-                "data": add_callback,
-            },
-            self.database,
-            self.api,
-        )
+        track = self.database.list_library(7, 10)[0]
         handle_callback(
             {
                 "id": "callback-play",
                 "from": {"id": 7},
                 "message": {"chat": {"id": 7, "type": "private"}, "message_id": 200},
-                "data": f"play:{self.database.list_playlists(7)[0]['id']}",
+                "data": f"search_play:{track['id']}",
             },
             self.database,
             self.api,
@@ -80,11 +73,10 @@ class BotTests(unittest.TestCase):
             copy_calls,
             [{"chat_id": 7, "from_chat_id": 7, "message_id": 123}],
         )
-        tracks = self.database.list_tracks(7, "Road Trip")
-        self.assertEqual(tracks[0]["title"], "Track")
-        self.assertEqual(tracks[0]["file_unique_id"], "file-unique")
+        self.assertEqual(track["title"], "Track")
+        self.assertEqual(track["file_unique_id"], "file-unique")
         self.assertIsNotNone(
-            self.database.list_message_references(7, tracks[0]["id"])[0]["last_verified_at"]
+            self.database.list_message_references(7, track["id"])[0]["last_verified_at"]
         )
 
     def test_shared_archive_copies_once_and_is_used_for_playback(self) -> None:
@@ -106,23 +98,7 @@ class BotTests(unittest.TestCase):
                 },
                 self.database,
                 self.api,
-            )
-            callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0][
-                "callback_data"
-            ]
-            handle_callback(
-                {
-                    "id": f"callback-add-{user_id}",
-                    "from": {"id": user_id},
-                    "message": {
-                        "chat": {"id": user_id, "type": "private"},
-                        "message_id": 200,
-                    },
-                    "data": callback_data,
-                },
-                self.database,
-                self.api,
-                archive_chat_id,
+                archive_chat_id=archive_chat_id,
             )
 
         archive_copies = [
@@ -144,6 +120,29 @@ class BotTests(unittest.TestCase):
             self.assertEqual(archive_reference["source_chat_id"], archive_chat_id)
             self.assertEqual(archive_reference["source_message_id"], 901)
 
+        with self.database._connection() as connection:
+            asset = connection.execute(
+                """
+                SELECT track_id FROM archive_assets
+                WHERE archive_chat_id = ? AND telegram_file_unique_id = ?
+                """,
+                (archive_chat_id, "shared-file"),
+            ).fetchone()
+            catalog_track = connection.execute(
+                """
+                SELECT t.title, a.name AS performer
+                FROM catalog_tracks AS t
+                JOIN catalog_track_artists AS link ON link.track_id = t.id
+                JOIN artists AS a ON a.id = link.artist_id
+                WHERE t.id = ?
+                """,
+                (asset["track_id"],),
+            ).fetchone()
+            self.assertEqual(dict(catalog_track), {
+                "title": "Shared track",
+                "performer": "Shared artist",
+            })
+
         track = self.database.list_library(7, 10)[0]
         handle_callback(
             {
@@ -154,7 +153,7 @@ class BotTests(unittest.TestCase):
             },
             self.database,
             self.api,
-            archive_chat_id,
+            archive_chat_id=archive_chat_id,
         )
         self.assertIn(
             ("copyMessage", {"chat_id": 7, "from_chat_id": archive_chat_id, "message_id": 901}),
@@ -169,6 +168,59 @@ class BotTests(unittest.TestCase):
                 "shared-file",
             )
         )
+
+    def test_shared_archive_matches_musicbrainz_id_not_title(self) -> None:
+        class FakeProvider:
+            def lookup_recording(
+                self, title: str, artist: str | None
+            ) -> RecordingMetadata:
+                return RecordingMetadata(
+                    recording_id="shared-recording-id",
+                    title=f"Canonical {title}",
+                    artist=artist,
+                    release_title=None,
+                    score=98,
+                )
+
+        archive_chat_id = -100123456789
+        self.api.responses["copyMessage"] = {"message_id": 902}
+        self.database.create_playlist(8, "Other")
+
+        for user_id, message_id, source_title in (
+            (7, 125, "First upload"),
+            (8, 457, "Different title"),
+        ):
+            handle_message(
+                {
+                    "chat": {"id": user_id, "type": "private"},
+                    "from": {"id": user_id},
+                    "message_id": message_id,
+                    "audio": {
+                        "title": source_title,
+                        "performer": "Same artist",
+                        "file_unique_id": f"file-{user_id}",
+                    },
+                },
+                self.database,
+                self.api,
+                FakeProvider(),
+                archive_chat_id,
+            )
+
+        archive_copies = [
+            parameters
+            for method, parameters in self.api.calls
+            if method == "copyMessage" and parameters.get("chat_id") == archive_chat_id
+        ]
+        self.assertEqual(len(archive_copies), 1)
+        for user_id in (7, 8):
+            track = self.database.list_library(user_id, 10)[0]
+            reference = self.database.get_available_message_reference(
+                user_id,
+                track["id"],
+                preferred_chat_id=archive_chat_id,
+            )
+            self.assertEqual(reference["source_message_id"], 902)
 
     def test_archive_copy_failure_keeps_saved_source_and_shows_notice(self) -> None:
         archive_chat_id = -100123456789
@@ -188,29 +240,13 @@ class BotTests(unittest.TestCase):
             },
             self.database,
             self.api,
+            archive_chat_id=archive_chat_id,
         )
-        callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0][
-            "callback_data"
-        ]
-        handle_callback(
-            {
-                "id": "callback-add-no-channel-permission",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 200},
-                "data": callback_data,
-            },
-            self.database,
-            self.api,
-            archive_chat_id,
+        self.assertIn(
+            "could not be copied to the shared archive",
+            self.api.messages[-1][1],
         )
-
-        edit_call = next(
-            parameters
-            for method, parameters in reversed(self.api.calls)
-            if method == "editMessageText"
-        )
-        self.assertIn("could not be copied to the shared archive", edit_call["text"])
-        track = self.database.list_tracks(7, "Road Trip")[0]
+        track = self.database.list_library(7, 10)[0]
         self.assertEqual(len(self.database.list_message_references(7, track["id"])), 1)
         self.assertTrue(
             self.database.get_available_message_reference(7, track["id"])
@@ -239,19 +275,8 @@ class BotTests(unittest.TestCase):
             FakeProvider(),
         )
         self.assertIn("Canonical Album", self.api.messages[-1][1])
-        callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
-        handle_callback(
-            {
-                "id": "callback-add-enriched",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 216},
-                "data": callback_data,
-            },
-            self.database,
-            self.api,
-        )
 
-        track = self.database.list_tracks(7, "Road Trip")[0]
+        track = self.database.list_library(7, 10)[0]
         self.assertEqual(track["title"], "Canonical Title")
         self.assertEqual(track["performer"], "Canonical Artist")
         self.assertEqual(track["release_title"], "Canonical Album")
@@ -277,10 +302,10 @@ class BotTests(unittest.TestCase):
         )
         prompt = self.api.messages[-1][1]
         self.assertIn("lookup failed", prompt)
-        pending = self.database.get_pending_track(7, 7, 812)
-        self.assertEqual(pending["title"], "Original Title")
-        self.assertEqual(pending["performer"], "Original Artist")
-        self.assertIsNone(pending["musicbrainz_recording_id"])
+        track = self.database.list_library(7, 10)[0]
+        self.assertEqual(track["title"], "Original Title")
+        self.assertEqual(track["performer"], "Original Artist")
+        self.assertIsNone(track["musicbrainz_recording_id"])
 
     def test_shuffle_play_sends_all_tracks_in_randomized_order(self) -> None:
         playlist_id = self.database.list_playlists(7)[0]["id"]
@@ -405,7 +430,14 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        self.assertIsNone(self.database.get_track(7, track_id))
+        self.assertIsNotNone(self.database.get_track(7, track_id))
+        self.assertNotIn(
+            track_id,
+            [
+                track["id"]
+                for track in self.database.list_tracks_by_id(7, playlist_id)
+            ],
+        )
 
     def test_link_command_adds_an_alternate_source_reference(self) -> None:
         track_id = self.database.add_track(
@@ -456,19 +488,7 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
-        handle_callback(
-            {
-                "id": "add-document",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 219},
-                "data": callback_data,
-            },
-            self.database,
-            self.api,
-        )
-
-        track = self.database.list_tracks(7, "Road Trip")[0]
+        track = self.database.list_library(7, 10)[0]
         self.assertEqual(track["title"], "recording.flac")
         self.assertEqual(track["media_type"], "document")
         self.assertEqual(track["telegram_file_id"], "telegram-file-id")
@@ -777,29 +797,10 @@ class BotTests(unittest.TestCase):
         }
         for _ in range(2):
             handle_message(message, self.database, self.api)
-            callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
-            handle_callback(
-                {
-                    "id": f"callback-add-{_}",
-                    "from": {"id": 7},
-                    "message": {
-                        "chat": {"id": 7, "type": "private"},
-                        "message_id": 212,
-                    },
-                    "data": callback_data,
-                },
-                self.database,
-                self.api,
-            )
-
-        tracks = self.database.list_tracks(7, "Road Trip")
+        tracks = self.database.list_library(7, 10)
         self.assertEqual(len(tracks), 1)
         self.assertTrue(
-            any(
-                "already in" in parameters.get("text", "")
-                for method, parameters in self.api.calls
-                if method == "editMessageText"
-            )
+            any("already in" in text for _, text, _ in self.api.messages)
         )
 
     def test_group_chat_audio_is_ignored(self) -> None:
@@ -1088,8 +1089,20 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        choose_keyboard = self.api.messages[-1][2]["inline_keyboard"]
-        create_callback = choose_keyboard[0][0]["callback_data"]
+        track_id = self.database.list_library(7, 10)[0]["id"]
+        handle_callback(
+            {
+                "id": "callback-open-collections",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 202},
+                "data": f"library_add:{track_id}",
+            },
+            self.database,
+            self.api,
+        )
+        create_callback = self.api.calls[-1][1]["reply_markup"]["inline_keyboard"][0][0][
+            "callback_data"
+        ]
         handle_callback(
             {
                 "id": "callback-create-from-audio",
@@ -1106,18 +1119,6 @@ class BotTests(unittest.TestCase):
             self.api,
         )
 
-        add_keyboard = self.api.messages[-1][2]["inline_keyboard"]
-        add_callback = add_keyboard[0][0]["callback_data"]
-        handle_callback(
-            {
-                "id": "callback-save-new-audio",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 203},
-                "data": add_callback,
-            },
-            self.database,
-            self.api,
-        )
         tracks = self.database.list_tracks(7, "New playlist")
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0]["source_message_id"], 321)
@@ -1134,7 +1135,20 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        create_callback = self.api.messages[-1][2]["inline_keyboard"][1][0]["callback_data"]
+        track_id = self.database.list_library(7, 10)[0]["id"]
+        handle_callback(
+            {
+                "id": "callback-open-collections",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 207},
+                "data": f"library_add:{track_id}",
+            },
+            self.database,
+            self.api,
+        )
+        create_callback = self.api.calls[-1][1]["reply_markup"]["inline_keyboard"][1][0][
+            "callback_data"
+        ]
         handle_callback(
             {
                 "id": "callback-create-duplicate",
@@ -1150,20 +1164,18 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        self.assertIn("already exists", self.api.messages[-2][1])
-        add_callback = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
-        handle_callback(
-            {
-                "id": "callback-add-after-duplicate",
-                "from": {"id": 7},
-                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 208},
-                "data": add_callback,
-            },
+        self.assertIn("already exists", self.api.messages[-1][1])
+        handle_message(
+            {"chat": {"id": 7, "type": "private"}, "from": {"id": 7}, "text": "Road Trip 2"},
             self.database,
             self.api,
         )
         tracks = self.database.list_tracks(7, "Road Trip")
-        self.assertEqual(tracks[0]["source_message_id"], 654)
+        self.assertEqual(tracks, [])
+        self.assertEqual(
+            len(self.database.list_tracks(7, "Road Trip 2")),
+            1,
+        )
 
     def test_playlist_menu_paginates_large_lists(self) -> None:
         for index in range(9):
@@ -1196,7 +1208,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(second_keyboard[0][0]["text"], "🎵 Playlist 08 (0)")
         self.assertEqual(second_keyboard[2][0]["callback_data"], "playlist_page:0")
 
-    def test_audio_playlist_chooser_paginates_and_preserves_source_reference(self) -> None:
+    def test_optional_collection_picker_paginates_for_saved_library_track(self) -> None:
         for index in range(9):
             self.database.create_playlist(7, f"Playlist {index:02}")
         handle_message(
@@ -1209,9 +1221,20 @@ class BotTests(unittest.TestCase):
             self.database,
             self.api,
         )
-        first_keyboard = self.api.messages[-1][2]["inline_keyboard"]
+        track_id = self.database.list_library(7, 10)[0]["id"]
+        handle_callback(
+            {
+                "id": "callback-open-collections",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 206},
+                "data": f"library_add:{track_id}",
+            },
+            self.database,
+            self.api,
+        )
+        first_keyboard = self.api.calls[-1][1]["reply_markup"]["inline_keyboard"]
         next_data = first_keyboard[8][0]["callback_data"]
-        self.assertEqual(next_data, "choose_page:1:7:777")
+        self.assertEqual(next_data, f"track_choose_page:1:{track_id}")
 
         handle_callback(
             {
@@ -1225,7 +1248,13 @@ class BotTests(unittest.TestCase):
         )
         second_keyboard = self.api.calls[-1][1]["reply_markup"]["inline_keyboard"]
         add_data = second_keyboard[0][0]["callback_data"]
-        self.assertTrue(add_data.endswith(":7:777"))
+        self.assertTrue(add_data.endswith(f":{track_id}"))
+        self.assertEqual(
+            self.database.library_repository.get_track_id_for_source_reference(
+                7, 7, 777
+            ),
+            track_id,
+        )
 
     @patch("bot.urlopen")
     def test_telegram_api_reports_invalid_json(self, urlopen: MagicMock) -> None:

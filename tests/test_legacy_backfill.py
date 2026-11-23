@@ -12,7 +12,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import create_database_engine
 from app.database.legacy_backfill import run_legacy_backfill
+from app.database.migrations import backfill_legacy_library
 from app.database.models import (
+    ArchiveAsset,
     CatalogTrack,
     LegacyImportMap,
     LegacyImportSource,
@@ -123,6 +125,17 @@ class LegacyBackfillTests(unittest.TestCase):
             self.assertEqual(imports, [])
         finally:
             engine.dispose()
+
+    def test_runtime_backfill_rejects_existing_normalized_library_data(self) -> None:
+        self._seed()
+        self.legacy.library_repository.create_metadata_only_track(
+            42,
+            "Already normalized",
+            "Artist",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "existing normalized library"):
+            backfill_legacy_library(self.source_url)
 
     def test_imports_early_sqlite_schema_without_optional_tables(self) -> None:
         old_source_path = Path(self.directory.name) / "version1.sqlite3"
@@ -321,6 +334,83 @@ class LegacyBackfillTests(unittest.TestCase):
                 "local-library",
                 apply=True,
             )
+
+    def test_apply_links_only_unambiguous_archive_assets(self) -> None:
+        self.legacy.create_playlist(42, "Archive")
+        self.legacy.add_track(
+            42,
+            "Archive",
+            100,
+            201,
+            "Known track",
+            "Artist",
+            "audio",
+            "single-file",
+            musicbrainz_recording_id="single-recording",
+        )
+        for message_id in (202, 203):
+            self.legacy.add_track(
+                42,
+                "Archive",
+                100,
+                message_id,
+                f"Ambiguous track {message_id}",
+                "Artist",
+                "audio",
+                "ambiguous-file",
+            )
+
+        engine = self._target_engine()
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    ArchiveAsset.__table__.insert(),
+                    [
+                        {
+                            "archive_chat_id": -10012345,
+                            "archive_message_id": 901,
+                            "telegram_file_unique_id": "single-file",
+                            "media_type": "audio",
+                        },
+                        {
+                            "archive_chat_id": -10012345,
+                            "archive_message_id": 902,
+                            "telegram_file_unique_id": "ambiguous-file",
+                            "media_type": "audio",
+                        },
+                    ],
+                )
+        finally:
+            engine.dispose()
+
+        run_legacy_backfill(
+            self.source_url,
+            self.target_url,
+            "archive-linking",
+            apply=True,
+        )
+
+        engine = self._target_engine()
+        try:
+            with engine.connect() as connection:
+                linked = dict(
+                    connection.execute(
+                        select(
+                            ArchiveAsset.telegram_file_unique_id,
+                            ArchiveAsset.track_id,
+                        )
+                    ).all()
+                )
+                linked_mbid = connection.execute(
+                    select(CatalogTrack.musicbrainz_recording_id).where(
+                        CatalogTrack.id == linked["single-file"]
+                    )
+                ).scalar_one()
+        finally:
+            engine.dispose()
+
+        self.assertEqual(linked_mbid, "single-recording")
+        self.assertIsNone(linked["ambiguous-file"])
 
     def test_apply_rolls_back_everything_when_target_conflicts(self) -> None:
         self._seed()
