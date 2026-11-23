@@ -27,7 +27,7 @@ class LegacyInventoryTests(unittest.TestCase):
         )
 
         self.assertEqual(report["dialect"], "sqlite")
-        self.assertEqual(report["sqlite_schema_version"], 7)
+        self.assertEqual(report["sqlite_schema_version"], 8)
         self.assertEqual(report["tables"]["playlists"], 2)
         self.assertEqual(report["tables"]["tracks"], 2)
         self.assertEqual(report["integrity"]["tracks_without_playlist"], 0)

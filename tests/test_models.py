@@ -116,7 +116,7 @@ class ModelMigrationTests(unittest.TestCase):
         try:
             self.assertEqual(
                 connection.execute("PRAGMA user_version").fetchone()[0],
-                7,
+                8,
             )
             tables = {
                 row[0]

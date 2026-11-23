@@ -5,6 +5,7 @@ A private-chat Telegram bot for organizing a personal music archive. Audio remai
 ## Features
 
 - Save Telegram audio messages, voice messages, and audio MIME-type documents with their original chat/message reference.
+- Optionally copy new submissions to a private Telegram archive channel; reuse an available archived message for matching Telegram `file_unique_id` values and prefer it for playback.
 - Preserve Telegram file identifiers and available title, artist, duration, MIME type, and filename metadata. `file_unique_id` is used only as a duplicate hint; it is not used for playback.
 - Keep multiple source-message references per saved track, mark failed references unavailable without deleting metadata, and use `/link` to associate another Telegram copy with a saved track.
 - Create, rename, browse, search, play, and delete private playlists/collections; play or remove individual tracks from a collection's track list, and add an existing track to another collection with `/addtrack`. Collection delivery is capped at 20 Telegram messages per request, paced between messages, and retries Telegram rate-limit responses once.
@@ -19,14 +20,21 @@ The bot ignores chats other than private chats. `/start` and `/help` open the ma
 
 ## Run locally
 
-Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set. The existing bot can run with the Python standard library; install the requirements to run the test suite or use the new Alembic schema:
+Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set. The bot loads variables from a local `.env` file when present; environment variables already set by the shell take precedence. Install the requirements to run the bot and tests:
 
 ```sh
+cp .env.example .env
+# Set BOT_TOKEN and, optionally, ARCHIVE_CHAT_ID in .env.
 python3 -m pip install -r requirements.txt
-export BOT_TOKEN='your-token-from-botfather'
-export DATABASE_PATH='./playlist_bot.sqlite3'  # optional; this is the default
 python3 bot.py
 ```
+
+To enable the shared archive, create a private channel, add the bot as an
+administrator with permission to post messages, and set `ARCHIVE_CHAT_ID` to
+the channel's numeric Telegram chat ID. If this setting is empty, the bot keeps
+using the original user-message references. If Telegram cannot copy a message
+to the channel, the library save still succeeds and the original source remains
+available.
 
 For local PostgreSQL instead, install the PostgreSQL driver and set a connection URL:
 
@@ -121,6 +129,7 @@ Keep `.env` private. The CI workflow runs unit tests and builds the container im
 - Track ratings, notes, and tags are user-private. Tags are owner-scoped and are included in that user's library search only.
 - Provider-only results are stored separately as metadata-only records and never acquire a fabricated Telegram reference. Sending the audio later adds a playable library track; it does not automatically merge the metadata-only record.
 - Copying does not expose source attribution. `TelegramDeliveryService` can be configured to use forwarding instead. The original source message must remain accessible to the bot; Telegram privacy, channel permissions, deletion, and Bot API restrictions may prevent retrieval. References are not guaranteed to work forever.
+- Shared archive support is optional and stores archive locations separately from user tracks; it does not download media or store audio binaries. Archived messages are deduplicated by Telegram `file_unique_id` within this bot's database, and remain registered when a user's track is removed.
 
 The normalized application service in `archive.py` depends on a repository protocol, not Telegram update objects. Telegram-specific polling and delivery are in `bot.py` and `telegram_delivery.py`; persistence adapters are in `database.py` and `postgres_database.py`.
 

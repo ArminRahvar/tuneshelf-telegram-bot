@@ -48,6 +48,15 @@ class RepositoryContractAssertions:
         )
         track = repository.list_tracks_by_id(owner_id, favorites_id)[0]
         track_id = int(track["id"])
+        self.assertEqual(
+            repository.get_track_id_for_source_reference(
+                owner_id,
+                favorites_id,
+                -100123,
+                81,
+            ),
+            track_id,
+        )
         self.assertFalse(
             repository.add_track_to_playlist(
                 owner_id,
@@ -61,6 +70,109 @@ class RepositoryContractAssertions:
             )
         )
         self.assertEqual(len(repository.list_message_references(owner_id, track_id)), 2)
+
+        archive_chat_id = -100987654
+        self.assertTrue(
+            repository.save_shared_archive_asset(
+                archive_chat_id,
+                902,
+                "parity-file",
+                "audio",
+                original_filename="parity.mp3",
+            )
+        )
+        self.assertTrue(
+            repository.add_message_reference(
+                owner_id,
+                track_id,
+                archive_chat_id,
+                902,
+                "audio",
+                file_unique_id="parity-file",
+            )
+        )
+        self.assertEqual(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                "parity-file",
+            )["archive_message_id"],
+            902,
+        )
+        self.assertEqual(
+            repository.get_available_message_reference(
+                owner_id,
+                track_id,
+                preferred_chat_id=archive_chat_id,
+            )["source_message_id"],
+            902,
+        )
+        other_favorites_id = next(
+            row["id"]
+            for row in repository.list_collections(other_user_id)
+            if row["name"] == "Favorites"
+        )
+        self.assertTrue(
+            repository.add_track_to_playlist(
+                other_user_id,
+                other_favorites_id,
+                -100456,
+                91,
+                "Other user's track",
+                "Other artist",
+                "audio",
+                "other-file",
+            )
+        )
+        other_track_id = int(
+            repository.list_tracks_by_id(other_user_id, other_favorites_id)[0]["id"]
+        )
+        self.assertTrue(
+            repository.add_message_reference(
+                other_user_id,
+                other_track_id,
+                archive_chat_id,
+                902,
+                "audio",
+                file_unique_id="parity-file",
+            )
+        )
+        archive_reference = next(
+            reference
+            for reference in repository.list_message_references(owner_id, track_id)
+            if reference["source_chat_id"] == archive_chat_id
+        )
+        self.assertTrue(
+            repository.mark_message_reference_unavailable(
+                owner_id,
+                int(archive_reference["id"]),
+            )
+        )
+        self.assertIsNone(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                "parity-file",
+            )
+        )
+        other_archive_reference = next(
+            reference
+            for reference in repository.list_message_references(
+                other_user_id,
+                other_track_id,
+            )
+            if reference["source_chat_id"] == archive_chat_id
+        )
+        self.assertTrue(
+            repository.mark_message_reference_verified(
+                other_user_id,
+                int(other_archive_reference["id"]),
+            )
+        )
+        self.assertIsNotNone(
+            repository.find_shared_archive_reference(
+                archive_chat_id,
+                "parity-file",
+            )
+        )
 
         self.assertTrue(repository.set_track_rating(owner_id, track_id, 5))
         self.assertTrue(repository.set_track_note(owner_id, track_id, "Parity note"))
@@ -77,7 +189,7 @@ class RepositoryContractAssertions:
         self.assertEqual(repository.list_track_tags(owner_id, copied_track["id"]), ["Road music"])
         self.assertEqual(
             len(repository.list_message_references(owner_id, copied_track["id"])),
-            2,
+            3,
         )
         self.assertFalse(
             repository.add_track_to_collection(

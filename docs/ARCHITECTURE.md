@@ -28,6 +28,14 @@ common library behavior; the PostgreSQL contract runs in a dedicated CI job.
 Both database adapters implement behavior separately, so remaining workflows
 still need parity coverage before a runtime switch.
 
+When `ARCHIVE_CHAT_ID` is configured, new saved submissions are copied to that
+private Telegram channel. Available archive message references are reused by
+`file_unique_id` across users and preferred during playback. Archive failures
+leave the original source reference usable. The current legacy adapters record
+archive locations in a shared asset table, independently of user-owned
+message references. The normalized `ArchiveAsset` model is not yet the runtime
+persistence path.
+
 The bot stores Telegram source-message references and metadata; it does not
 download audio or upload it to a shared archive. Playback copies or forwards
 the original message. Updates are polled and handled synchronously and

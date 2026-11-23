@@ -39,15 +39,20 @@ track rows, and current bot workflows still pass.
 
 ## Phase 2 — Shared Telegram archive
 
-- Configure a private archive channel without committing credentials.
-- Add an archive integration that uploads new submissions and records archive
-  chat/message references.
-- Separate archive assets from user source-message references and library
-  membership.
+- Optional `ARCHIVE_CHAT_ID` configures a private archive channel without
+  committing credentials; new saved submissions are copied there and the
+  returned chat/message references are associated with the user's track.
+- Reuse an available archive message for matching Telegram `file_unique_id`
+  values across users, and prefer the archive reference during playback.
+- Failures to copy to the channel are surfaced without losing the original
+  playable source.
+- Legacy adapters now persist shared archive assets independently from
+  user-owned source-message references and library membership. The normalized
+  `ArchiveAsset` model exists but is not yet the runtime persistence path.
 - Add conservative duplicate matching with stable external IDs first; do not
   rely on title-only matching.
-- Reuse a valid archive asset, handle inaccessible/deleted messages, and test
-  the flow with mocked Telegram calls.
+- Test the flow with mocked Telegram calls; archive unavailability is tracked
+  across references to the same Telegram message.
 
 ## Phase 3 — Personal library and playlists
 

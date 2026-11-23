@@ -12,6 +12,8 @@ class FakeTelegramAPI:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str, dict[str, object] | None]] = []
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.responses: dict[str, object] = {}
+        self.errors: dict[str, TelegramAPIError] = {}
 
     def send_message(
         self, chat_id: int, text: str, reply_markup: dict[str, object] | None = None
@@ -20,7 +22,9 @@ class FakeTelegramAPI:
 
     def call(self, method: str, **parameters: object) -> object:
         self.calls.append((method, parameters))
-        return {}
+        if method in self.errors:
+            raise self.errors[method]
+        return self.responses.get(method, {})
 
 
 class BotTests(unittest.TestCase):
@@ -81,6 +85,135 @@ class BotTests(unittest.TestCase):
         self.assertEqual(tracks[0]["file_unique_id"], "file-unique")
         self.assertIsNotNone(
             self.database.list_message_references(7, tracks[0]["id"])[0]["last_verified_at"]
+        )
+
+    def test_shared_archive_copies_once_and_is_used_for_playback(self) -> None:
+        archive_chat_id = -100123456789
+        self.api.responses["copyMessage"] = {"message_id": 901}
+        self.database.create_playlist(8, "Other")
+
+        for user_id, message_id in ((7, 123), (8, 456)):
+            handle_message(
+                {
+                    "chat": {"id": user_id, "type": "private"},
+                    "from": {"id": user_id},
+                    "message_id": message_id,
+                    "audio": {
+                        "title": "Shared track",
+                        "performer": "Shared artist",
+                        "file_unique_id": "shared-file",
+                    },
+                },
+                self.database,
+                self.api,
+            )
+            callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0][
+                "callback_data"
+            ]
+            handle_callback(
+                {
+                    "id": f"callback-add-{user_id}",
+                    "from": {"id": user_id},
+                    "message": {
+                        "chat": {"id": user_id, "type": "private"},
+                        "message_id": 200,
+                    },
+                    "data": callback_data,
+                },
+                self.database,
+                self.api,
+                archive_chat_id,
+            )
+
+        archive_copies = [
+            parameters
+            for method, parameters in self.api.calls
+            if method == "copyMessage" and parameters.get("chat_id") == archive_chat_id
+        ]
+        self.assertEqual(
+            archive_copies,
+            [{"chat_id": archive_chat_id, "from_chat_id": 7, "message_id": 123}],
+        )
+        for user_id in (7, 8):
+            track = self.database.list_library(user_id, 10)[0]
+            archive_reference = self.database.get_available_message_reference(
+                user_id,
+                track["id"],
+                preferred_chat_id=archive_chat_id,
+            )
+            self.assertEqual(archive_reference["source_chat_id"], archive_chat_id)
+            self.assertEqual(archive_reference["source_message_id"], 901)
+
+        track = self.database.list_library(7, 10)[0]
+        handle_callback(
+            {
+                "id": "callback-play-archive",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 201},
+                "data": f"search_play:{track['id']}",
+            },
+            self.database,
+            self.api,
+            archive_chat_id,
+        )
+        self.assertIn(
+            ("copyMessage", {"chat_id": 7, "from_chat_id": archive_chat_id, "message_id": 901}),
+            self.api.calls,
+        )
+        for user_id in (7, 8):
+            playlist_id = self.database.list_playlists(user_id)[0]["id"]
+            self.database.delete_playlist_by_id(user_id, playlist_id)
+        self.assertIsNotNone(
+            self.database.find_shared_archive_reference(
+                archive_chat_id,
+                "shared-file",
+            )
+        )
+
+    def test_archive_copy_failure_keeps_saved_source_and_shows_notice(self) -> None:
+        archive_chat_id = -100123456789
+        self.api.errors["copyMessage"] = TelegramAPIError(
+            "bot is not an administrator",
+            error_code=403,
+        )
+        handle_message(
+            {
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 7},
+                "message_id": 123,
+                "audio": {
+                    "title": "Track",
+                    "file_unique_id": "track-file",
+                },
+            },
+            self.database,
+            self.api,
+        )
+        callback_data = self.api.messages[-1][2]["inline_keyboard"][0][0][
+            "callback_data"
+        ]
+        handle_callback(
+            {
+                "id": "callback-add-no-channel-permission",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 200},
+                "data": callback_data,
+            },
+            self.database,
+            self.api,
+            archive_chat_id,
+        )
+
+        edit_call = next(
+            parameters
+            for method, parameters in reversed(self.api.calls)
+            if method == "editMessageText"
+        )
+        self.assertIn("could not be copied to the shared archive", edit_call["text"])
+        track = self.database.list_tracks(7, "Road Trip")[0]
+        self.assertEqual(len(self.database.list_message_references(7, track["id"])), 1)
+        self.assertTrue(
+            self.database.get_available_message_reference(7, track["id"])
         )
 
     def test_musicbrainz_metadata_is_saved_without_changing_source_message(self) -> None:

@@ -184,9 +184,16 @@ class DatabaseTests(unittest.TestCase):
         tracks = upgraded.list_tracks(7, "Legacy")
         connection = sqlite3.connect(legacy_path)
         version = connection.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
         connection.close()
 
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
+        self.assertIn("telegram_archive_assets", tables)
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0]["title"], "Kept song")
         self.assertEqual(tracks[0]["source_message_id"], 99)

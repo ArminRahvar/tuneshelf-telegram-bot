@@ -5,11 +5,13 @@
 ### SQLite
 
 `database.py` uses `PRAGMA user_version` and applies schema versions 1 through
-7. The local database inspected during assessment is at version 7. Its main
-tables are:
+8. The local database inspected during assessment was at version 7; the next
+bot startup adds the independent shared archive-assets table. Its main tables
+are:
 
 - `users`, `playlists`, `tracks`
 - `telegram_message_references`
+- `telegram_archive_assets`
 - `tags`, `track_tags`
 - `metadata_only_tracks`
 - `pending_tracks`, `user_states`, `user_settings`
@@ -169,7 +171,7 @@ separate from bot startup and schema migration.
 
 ## Required migration tests
 
-- Fresh schema creation and upgrade from the current SQLite user_version 7.
+- Fresh schema creation and upgrade through SQLite user_version 8.
 - Upgrade from representative earlier SQLite versions, including version 1.
 - Idempotency and recovery behavior for interrupted migrations.
 - Preservation of playlists, tracks, source references, metadata, ratings,

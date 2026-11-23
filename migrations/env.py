@@ -19,6 +19,7 @@ LEGACY_TABLES = {
     "pending_tracks",
     "playlists",
     "tags",
+    "telegram_archive_assets",
     "telegram_message_references",
     "track_tags",
     "tracks",

@@ -220,6 +220,28 @@ class Database:
                     PRAGMA user_version = 7;
                     """
                 )
+                version = 7
+            if version < 8:
+                connection.executescript(
+                    """
+                    CREATE TABLE telegram_archive_assets (
+                    id INTEGER PRIMARY KEY,
+                    telegram_file_unique_id TEXT NOT NULL UNIQUE,
+                    archive_chat_id INTEGER NOT NULL,
+                    archive_message_id INTEGER NOT NULL
+                        CHECK (archive_message_id > 0),
+                    telegram_file_id TEXT,
+                    media_type TEXT NOT NULL,
+                    original_filename TEXT,
+                    is_available INTEGER NOT NULL DEFAULT 1
+                        CHECK (is_available IN (0, 1)),
+                    last_verified_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(archive_chat_id, archive_message_id)
+                    );
+                    PRAGMA user_version = 8;
+                    """
+                )
 
     def create_playlist(self, user_id: int, name: str) -> bool:
         with self._connection() as connection:
@@ -954,8 +976,91 @@ class Database:
             )
             return cursor.rowcount == 1
 
+    def get_track_id_for_source_reference(
+        self,
+        user_id: int,
+        playlist_id: int,
+        source_chat_id: int,
+        source_message_id: int,
+    ) -> int | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT t.id
+                FROM telegram_message_references AS r
+                JOIN tracks AS t ON t.id = r.track_id
+                JOIN playlists AS p ON p.id = t.playlist_id
+                WHERE r.owner_user_id = ? AND p.user_id = ? AND p.id = ?
+                  AND r.source_chat_id = ? AND r.source_message_id = ?
+                """,
+                (user_id, user_id, playlist_id, source_chat_id, source_message_id),
+            ).fetchone()
+            return int(row["id"]) if row is not None else None
+
+    def find_shared_archive_reference(
+        self,
+        archive_chat_id: int,
+        file_unique_id: str | None,
+    ) -> sqlite3.Row | None:
+        if not file_unique_id:
+            return None
+        with self._connection() as connection:
+            return connection.execute(
+                """
+                SELECT archive_chat_id, archive_message_id, media_type,
+                       telegram_file_unique_id, telegram_file_id,
+                       original_filename
+                FROM telegram_archive_assets
+                WHERE archive_chat_id = ? AND telegram_file_unique_id = ?
+                  AND is_available = 1
+                LIMIT 1
+                """,
+                (archive_chat_id, file_unique_id),
+            ).fetchone()
+
+    def save_shared_archive_asset(
+        self,
+        archive_chat_id: int,
+        archive_message_id: int,
+        file_unique_id: str | None,
+        media_type: str,
+        telegram_file_id: str | None = None,
+        original_filename: str | None = None,
+    ) -> bool:
+        if not file_unique_id:
+            return False
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO telegram_archive_assets (
+                    telegram_file_unique_id, archive_chat_id, archive_message_id,
+                    telegram_file_id, media_type, original_filename
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_file_unique_id) DO UPDATE SET
+                    archive_chat_id = excluded.archive_chat_id,
+                    archive_message_id = excluded.archive_message_id,
+                    telegram_file_id = excluded.telegram_file_id,
+                    media_type = excluded.media_type,
+                    original_filename = excluded.original_filename,
+                    is_available = 1,
+                    last_verified_at = NULL
+                """,
+                (
+                    file_unique_id,
+                    archive_chat_id,
+                    archive_message_id,
+                    telegram_file_id,
+                    media_type,
+                    original_filename,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def get_available_message_reference(
-        self, user_id: int, track_id: int
+        self,
+        user_id: int,
+        track_id: int,
+        preferred_chat_id: int | None = None,
     ) -> sqlite3.Row | None:
         with self._connection() as connection:
             return connection.execute(
@@ -966,10 +1071,13 @@ class Database:
                 JOIN playlists AS p ON p.id = t.playlist_id
                 WHERE r.track_id = ? AND r.owner_user_id = ? AND p.user_id = ?
                   AND r.is_available = 1
-                ORDER BY r.id
+                ORDER BY CASE
+                    WHEN ? IS NOT NULL AND r.source_chat_id = ? THEN 0
+                    ELSE 1
+                END, r.id
                 LIMIT 1
                 """,
-                (track_id, user_id, user_id),
+                (track_id, user_id, user_id, preferred_chat_id, preferred_chat_id),
             ).fetchone()
 
     def list_message_references(
@@ -1001,41 +1109,69 @@ class Database:
         self, user_id: int, reference_id: int
     ) -> bool:
         with self._connection() as connection:
-            cursor = connection.execute(
+            reference = connection.execute(
+                """
+                SELECT r.source_chat_id, r.source_message_id
+                FROM telegram_message_references AS r
+                JOIN tracks AS t ON t.id = r.track_id
+                JOIN playlists AS p ON p.id = t.playlist_id
+                WHERE r.id = ? AND r.owner_user_id = ? AND p.user_id = ?
+                """,
+                (reference_id, user_id, user_id),
+            ).fetchone()
+            if reference is None:
+                return False
+            connection.execute(
                 """
                 UPDATE telegram_message_references
                 SET is_available = 0
-                WHERE id = ? AND owner_user_id = ?
-                  AND EXISTS (
-                    SELECT 1 FROM tracks AS t
-                    JOIN playlists AS p ON p.id = t.playlist_id
-                    WHERE t.id = telegram_message_references.track_id
-                      AND p.user_id = ?
-                  )
+                WHERE source_chat_id = ? AND source_message_id = ?
                 """,
-                (reference_id, user_id, user_id),
+                (reference["source_chat_id"], reference["source_message_id"]),
             )
-            return cursor.rowcount == 1
+            connection.execute(
+                """
+                UPDATE telegram_archive_assets
+                SET is_available = 0
+                WHERE archive_chat_id = ? AND archive_message_id = ?
+                """,
+                (reference["source_chat_id"], reference["source_message_id"]),
+            )
+            return True
 
     def mark_message_reference_verified(
         self, user_id: int, reference_id: int
     ) -> bool:
         with self._connection() as connection:
-            cursor = connection.execute(
+            reference = connection.execute(
+                """
+                SELECT r.source_chat_id, r.source_message_id
+                FROM telegram_message_references AS r
+                JOIN tracks AS t ON t.id = r.track_id
+                JOIN playlists AS p ON p.id = t.playlist_id
+                WHERE r.id = ? AND r.owner_user_id = ? AND p.user_id = ?
+                """,
+                (reference_id, user_id, user_id),
+            ).fetchone()
+            if reference is None:
+                return False
+            connection.execute(
                 """
                 UPDATE telegram_message_references
                 SET is_available = 1, last_verified_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND owner_user_id = ?
-                  AND EXISTS (
-                    SELECT 1 FROM tracks AS t
-                    JOIN playlists AS p ON p.id = t.playlist_id
-                    WHERE t.id = telegram_message_references.track_id
-                      AND p.user_id = ?
-                  )
+                WHERE source_chat_id = ? AND source_message_id = ?
                 """,
-                (reference_id, user_id, user_id),
+                (reference["source_chat_id"], reference["source_message_id"]),
             )
-            return cursor.rowcount == 1
+            connection.execute(
+                """
+                UPDATE telegram_archive_assets
+                SET is_available = 1, last_verified_at = CURRENT_TIMESTAMP
+                WHERE archive_chat_id = ? AND archive_message_id = ?
+                """,
+                (reference["source_chat_id"], reference["source_message_id"]),
+            )
+            return True
 
     def set_track_rating(self, user_id: int, track_id: int, rating: int | None) -> bool:
         if rating is not None and not 1 <= rating <= 5:

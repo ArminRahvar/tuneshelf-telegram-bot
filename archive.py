@@ -79,7 +79,24 @@ class ArchiveRepository(Protocol):
     ) -> bool: ...
 
     def get_available_message_reference(
-        self, user_id: int, track_id: int
+        self,
+        user_id: int,
+        track_id: int,
+        preferred_chat_id: int | None = None,
+    ) -> Any | None: ...
+
+    def get_track_id_for_source_reference(
+        self,
+        user_id: int,
+        playlist_id: int,
+        source_chat_id: int,
+        source_message_id: int,
+    ) -> int | None: ...
+
+    def find_shared_archive_reference(
+        self,
+        archive_chat_id: int,
+        file_unique_id: str | None,
     ) -> Any | None: ...
 
     def add_track_to_collection(
@@ -150,9 +167,16 @@ class PersonalMusicArchive:
         )
 
     def get_playable_reference(
-        self, owner_user_id: int, track_id: int
+        self,
+        owner_user_id: int,
+        track_id: int,
+        preferred_chat_id: int | None = None,
     ) -> Any | None:
-        return self.repository.get_available_message_reference(owner_user_id, track_id)
+        return self.repository.get_available_message_reference(
+            owner_user_id,
+            track_id,
+            preferred_chat_id,
+        )
 
     def list_collections(self, owner_user_id: int) -> list[Any]:
         return self.repository.list_playlists(owner_user_id)

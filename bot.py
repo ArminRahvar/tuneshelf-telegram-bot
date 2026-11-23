@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from dotenv import load_dotenv
+
 from archive import PersonalMusicArchive, TelegramMessageReference, TrackMetadata
 from database import Database
 from musicbrainz import MusicBrainzError, MusicBrainzProvider, RecordingMetadata
@@ -621,7 +623,9 @@ def _save_track(
     source_chat_id: int,
     source_message_id: int,
     database: Database,
-) -> tuple[str, bool] | None:
+    api: TelegramAPI,
+    archive_chat_id: int | None = None,
+) -> tuple[str, bool, str | None] | None:
     archive = PersonalMusicArchive(database)
     playlist = archive.get_collection(user_id, playlist_id)
     pending = database.get_pending_track(user_id, source_chat_id, source_message_id)
@@ -650,7 +654,97 @@ def _save_track(
         ),
     )
     database.delete_pending_track(user_id, source_chat_id, source_message_id)
-    return playlist["name"], saved
+    archive_notice = None
+    if archive_chat_id is not None:
+        track_id = database.get_track_id_for_source_reference(
+            user_id,
+            playlist_id,
+            source_chat_id,
+            source_message_id,
+        )
+        if track_id is None:
+            LOGGER.error(
+                "Saved track has no source reference: user=%s playlist=%s message=%s",
+                user_id,
+                playlist_id,
+                source_message_id,
+            )
+            archive_notice = (
+                "The track was added, but its shared archive copy could not be linked."
+            )
+        else:
+            archived = database.find_shared_archive_reference(
+                archive_chat_id,
+                pending["file_unique_id"],
+            )
+            if archived is None:
+                try:
+                    result = api.call(
+                        "copyMessage",
+                        chat_id=archive_chat_id,
+                        from_chat_id=source_chat_id,
+                        message_id=source_message_id,
+                    )
+                    archive_message_id = (
+                        result.get("message_id") if isinstance(result, dict) else None
+                    )
+                    if (
+                        not isinstance(archive_message_id, int)
+                        or isinstance(archive_message_id, bool)
+                        or archive_message_id < 1
+                    ):
+                        raise TelegramAPIError(
+                            "Telegram did not return a valid archived message ID."
+                        )
+                except TelegramAPIError as error:
+                    LOGGER.warning(
+                        "Could not copy track %s to the shared archive: %s",
+                        track_id,
+                        error,
+                    )
+                    archive_notice = (
+                        "The track was added, but could not be copied to the shared "
+                        "archive. Its original message remains available."
+                    )
+                else:
+                    asset_saved = database.save_shared_archive_asset(
+                        archive_chat_id,
+                        archive_message_id,
+                        pending["file_unique_id"],
+                        pending["media_type"],
+                        telegram_file_id=pending["telegram_file_id"],
+                        original_filename=pending["original_filename"],
+                    )
+                    if not asset_saved:
+                        LOGGER.warning(
+                            "Archived track %s has no Telegram file_unique_id; "
+                            "shared duplicate detection is unavailable",
+                            track_id,
+                        )
+                        archive_notice = (
+                            "The archive copy is available, but Telegram did not "
+                            "provide a file ID for future duplicate detection."
+                        )
+                    database.add_message_reference(
+                        user_id,
+                        track_id,
+                        archive_chat_id,
+                        archive_message_id,
+                        pending["media_type"],
+                        file_unique_id=pending["file_unique_id"],
+                        original_filename=pending["original_filename"],
+                    )
+            else:
+                database.add_message_reference(
+                    user_id,
+                    track_id,
+                    int(archived["archive_chat_id"]),
+                    int(archived["archive_message_id"]),
+                    archived["media_type"],
+                    file_unique_id=archived["telegram_file_unique_id"],
+                    original_filename=archived["original_filename"],
+                )
+    return playlist["name"], saved, archive_notice
 
 
 def _deliver_track(
@@ -659,10 +753,12 @@ def _deliver_track(
     track: dict[str, Any],
     database: Database,
     api: TelegramAPI,
+    archive_chat_id: int | None = None,
 ) -> bool:
     reference = PersonalMusicArchive(database).get_playable_reference(
         user_id,
         track["id"],
+        preferred_chat_id=archive_chat_id,
     )
     if reference is None:
         api.send_message(
@@ -723,6 +819,7 @@ def handle_message(
     database: Database,
     api: TelegramAPI,
     metadata_provider: MusicBrainzProvider | None = None,
+    archive_chat_id: int | None = None,
 ) -> None:
     chat = message.get("chat", {})
     if chat.get("type") != "private":
@@ -873,7 +970,7 @@ def handle_message(
         if track is None:
             api.send_message(chat_id, "That track is not in your personal library.")
             return
-        _deliver_track(user_id, chat_id, track, database, api)
+        _deliver_track(user_id, chat_id, track, database, api, archive_chat_id)
         return
     if command == "/note":
         pieces = command_args.split(maxsplit=1)
@@ -1334,7 +1431,12 @@ def handle_message(
     _show_home(api, chat_id, text="Use the menu buttons below to manage your playlists.")
 
 
-def handle_callback(callback: dict[str, Any], database: Database, api: TelegramAPI) -> None:
+def handle_callback(
+    callback: dict[str, Any],
+    database: Database,
+    api: TelegramAPI,
+    archive_chat_id: int | None = None,
+) -> None:
     callback_id = callback.get("id")
     user_id = callback.get("from", {}).get("id")
     message = callback.get("message", {})
@@ -1487,7 +1589,7 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
         if track is None:
             _show_home(api, chat_id, message_id, "That track is no longer available.")
         else:
-            _deliver_track(user_id, chat_id, track, database, api)
+            _deliver_track(user_id, chat_id, track, database, api, archive_chat_id)
     elif action == "playlist_page" and len(parts) == 2:
         _show_playlists(
             user_id, chat_id, database, api, message_id, page=int(parts[1])
@@ -1541,7 +1643,13 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
     elif action == "add" and len(parts) == 4:
         playlist_id, source_chat_id, source_message_id = map(int, parts[1:])
         save_result = _save_track(
-            user_id, playlist_id, source_chat_id, source_message_id, database
+            user_id,
+            playlist_id,
+            source_chat_id,
+            source_message_id,
+            database,
+            api,
+            archive_chat_id,
         )
         if save_result is None:
             _edit_or_send(
@@ -1552,12 +1660,16 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
                 message_id,
             )
         else:
-            playlist_name, saved = save_result
+            playlist_name, saved, archive_notice = save_result
             status = (
                 f"✅ Added the audio to “{playlist_name}”."
                 if saved
                 else f"That audio is already in “{playlist_name}”."
             )
+            if archive_chat_id is not None and archive_notice is None:
+                status += "\nAvailable from the shared archive."
+            elif archive_notice is not None:
+                status += f"\n⚠️ {archive_notice}"
             _edit_or_send(
                 api,
                 chat_id,
@@ -1603,7 +1715,7 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
             for index, track in enumerate(selected_tracks):
                 if index > 0:
                     time.sleep(COLLECTION_DELIVERY_INTERVAL)
-                _deliver_track(user_id, chat_id, track, database, api)
+                _deliver_track(user_id, chat_id, track, database, api, archive_chat_id)
     elif action == "remove" and len(parts) == 3:
         playlist_id, track_id = map(int, parts[1:])
         if PersonalMusicArchive(database).remove_from_collection(
@@ -1641,9 +1753,15 @@ def handle_callback(callback: dict[str, Any], database: Database, api: TelegramA
 
 
 def run() -> None:
+    load_dotenv()
     token = os.environ.get("BOT_TOKEN")
     if not token:
         raise RuntimeError("Set BOT_TOKEN to your Telegram bot token.")
+    archive_chat_id_value = os.environ.get("ARCHIVE_CHAT_ID", "").strip()
+    try:
+        archive_chat_id = int(archive_chat_id_value) if archive_chat_id_value else None
+    except ValueError as error:
+        raise RuntimeError("ARCHIVE_CHAT_ID must be an integer Telegram chat ID.") from error
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         from postgres_database import PostgresDatabase
@@ -1654,6 +1772,10 @@ def run() -> None:
         database = Database(os.environ.get("DATABASE_PATH", "playlist_bot.sqlite3"))
         LOGGER.info("Using SQLite archive database")
     api = TelegramAPI(token)
+    if archive_chat_id is None:
+        LOGGER.info("Shared Telegram archive disabled")
+    else:
+        LOGGER.info("Shared Telegram archive enabled: chat_id=%s", archive_chat_id)
     contact_email = os.environ.get("MUSICBRAINZ_CONTACT_EMAIL", "").strip()
     metadata_provider = None
     if contact_email:
@@ -1678,10 +1800,19 @@ def run() -> None:
                 offset = update["update_id"] + 1
                 try:
                     if "callback_query" in update:
-                        handle_callback(update["callback_query"], database, api)
+                        handle_callback(
+                            update["callback_query"],
+                            database,
+                            api,
+                            archive_chat_id,
+                        )
                     elif "message" in update:
                         handle_message(
-                            update["message"], database, api, metadata_provider
+                            update["message"],
+                            database,
+                            api,
+                            metadata_provider,
+                            archive_chat_id,
                         )
                 except Exception:
                     LOGGER.exception("Failed to handle Telegram update %s", update["update_id"])
