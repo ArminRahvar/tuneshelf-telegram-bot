@@ -225,6 +225,55 @@ class BotTests(unittest.TestCase):
         self.assertEqual(copy_calls[-1]["message_id"], 909)
         self.assertEqual(self.database.get_track(7, playlist_id)["source_message_id"], 909)
 
+    def test_collection_track_list_can_play_or_remove_individual_tracks(self) -> None:
+        playlist_id = self.database.list_playlists(7)[0]["id"]
+        track_id = self.database.add_track(
+            7, "Road Trip", 7, 910, "Northern Lights", "Nova", "audio", "file"
+        )
+        self.database.add_track(
+            7, "Road Trip", 7, 911, "Blue Hour", "Nova", "audio", "another-file"
+        )
+
+        handle_callback(
+            {
+                "id": "collection-tracks",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 215},
+                "data": f"tracks:{playlist_id}:0",
+            },
+            self.database,
+            self.api,
+        )
+        keyboard = self.api.calls[-1][1]["reply_markup"]["inline_keyboard"]
+        self.assertEqual(keyboard[0][0]["callback_data"], f"search_play:{track_id}")
+        self.assertEqual(keyboard[0][1]["callback_data"], f"remove:{playlist_id}:{track_id}")
+
+        handle_callback(
+            {
+                "id": "collection-track-play",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 215},
+                "data": keyboard[0][0]["callback_data"],
+            },
+            self.database,
+            self.api,
+        )
+        copy_calls = [params for method, params in self.api.calls if method == "copyMessage"]
+        self.assertEqual(copy_calls[-1]["message_id"], 910)
+        self.assertIsNotNone(self.database.get_track(7, track_id))
+
+        handle_callback(
+            {
+                "id": "collection-track-remove",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 215},
+                "data": keyboard[0][1]["callback_data"],
+            },
+            self.database,
+            self.api,
+        )
+        self.assertIsNone(self.database.get_track(7, track_id))
+
     def test_link_command_adds_an_alternate_source_reference(self) -> None:
         track_id = self.database.add_track(
             7, "Road Trip", 7, 909, "Northern Lights", "Nova", "audio", "file"

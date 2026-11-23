@@ -507,8 +507,13 @@ def _show_tracks(
     selected = tracks[start : start + TRACKS_PER_PAGE]
     keyboard: list[list[dict[str, str]]] = []
     for index, track in enumerate(selected, start + 1):
-        label = f"✖ #{track['id']} · {index}. {_format_track(track)}"
-        keyboard.append([_button(label[:60], f"remove:{playlist_id}:{track['id']}")])
+        label = f"▶ #{track['id']} · {index}. {_format_track(track)}"
+        keyboard.append(
+            [
+                _button(label[:60], f"search_play:{track['id']}"),
+                _button("✖ Remove", f"remove:{playlist_id}:{track['id']}"),
+            ]
+        )
     if page_count > 1:
         navigation: list[dict[str, str]] = []
         if page > 0:
@@ -521,7 +526,7 @@ def _show_tracks(
     keyboard.append([_button("⬅️ Playlist", f"open:{playlist_id}")])
     text = f"📃 {playlist['name']} — {len(tracks)} track(s)"
     if tracks:
-        text += "\nTap a track to remove it."
+        text += "\nChoose a track to play it, or tap Remove to remove it."
     else:
         text += "\nThis playlist is empty."
     _edit_or_send(api, chat_id, text, keyboard, message_id)

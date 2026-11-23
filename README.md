@@ -7,7 +7,7 @@ A private-chat Telegram bot for organizing a personal music archive. Audio remai
 - Save Telegram audio messages, voice messages, and audio MIME-type documents with their original chat/message reference.
 - Preserve Telegram file identifiers and available title, artist, duration, MIME type, and filename metadata. `file_unique_id` is used only as a duplicate hint; it is not used for playback.
 - Keep multiple source-message references per saved track, mark failed references unavailable without deleting metadata, and use `/link` to associate another Telegram copy with a saved track.
-- Create, rename, browse, search, play, and delete private playlists/collections; add an existing track to another collection with `/addtrack`. Collection delivery is capped at 20 Telegram messages per request, paced between messages, and retries Telegram rate-limit responses once.
+- Create, rename, browse, search, play, and delete private playlists/collections; play or remove individual tracks from a collection's track list, and add an existing track to another collection with `/addtrack`. Collection delivery is capped at 20 Telegram messages per request, paced between messages, and retries Telegram rate-limit responses once.
 - Edit metadata and manage private ratings, notes, and tags with `/edit`, `/rate`, `/note`, `/tag`, and `/untag`.
 - Use both a persistent reply keyboard and inline keyboards for Add Music, Library, Search, Collections, Discover, Statistics, and Settings. Library track buttons open details and provide inline controls for rating, notes, tags, metadata edits, and linking another Telegram source.
 - Search the private library by title, artist, album, collection, tags, rating, release year, or playability; filter with terms such as `rating:5 year:2024 playable:true` or `metadata:true`.
@@ -83,6 +83,12 @@ Keep `.env` private. The CI workflow runs unit tests and builds the container im
 - Copying does not expose source attribution. `TelegramDeliveryService` can be configured to use forwarding instead. The original source message must remain accessible to the bot; Telegram privacy, channel permissions, deletion, and Bot API restrictions may prevent retrieval. References are not guaranteed to work forever.
 
 The normalized application service in `archive.py` depends on a repository protocol, not Telegram update objects. Telegram-specific polling and delivery are in `bot.py` and `telegram_delivery.py`; persistence adapters are in `database.py` and `postgres_database.py`.
+
+## Architecture and roadmap
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the inspected architecture,
+[docs/DATABASE.md](docs/DATABASE.md) for the current schema and migration-safe
+target model, and [docs/ROADMAP.md](docs/ROADMAP.md) for staged development.
 
 ## Tests
 
