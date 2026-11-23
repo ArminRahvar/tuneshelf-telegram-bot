@@ -801,7 +801,15 @@ class LibraryRepository:
         musicbrainz_recording_id: str | None = None,
         provider_url: str | None = None,
         release_year: int | None = None,
+        source_provider: str | None = None,
     ) -> int:
+        normalized_provider = source_provider or (
+            "musicbrainz" if provider_url else None
+        )
+        if normalized_provider is not None and (
+            not normalized_provider.strip() or len(normalized_provider) > 64
+        ):
+            raise ValueError("Metadata provider must contain 1 to 64 characters.")
         with self.engine.begin() as connection:
             self._ensure_user(connection, user_id)
             if musicbrainz_recording_id:
@@ -810,6 +818,30 @@ class LibraryRepository:
                     .where(
                         CatalogTrack.musicbrainz_recording_id
                         == musicbrainz_recording_id
+                    )
+                    .order_by(CatalogTrack.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if existing_track_id is not None:
+                    member = connection.execute(
+                        select(LibraryEntry.track_id).where(
+                            LibraryEntry.user_id == user_id,
+                            LibraryEntry.track_id == existing_track_id,
+                        )
+                    ).first()
+                    if member is None:
+                        connection.execute(
+                            LibraryEntry.__table__.insert().values(
+                                user_id=user_id, track_id=existing_track_id
+                            )
+                        )
+                    return int(existing_track_id)
+            if normalized_provider and provider_url:
+                existing_track_id = connection.execute(
+                    select(CatalogTrack.id)
+                    .where(
+                        CatalogTrack.source_provider == normalized_provider,
+                        CatalogTrack.source_identifier == provider_url,
                     )
                     .order_by(CatalogTrack.id)
                     .limit(1)
@@ -849,7 +881,7 @@ class LibraryRepository:
                     album_id=album_id,
                     release_year=release_year,
                     musicbrainz_recording_id=musicbrainz_recording_id,
-                    source_provider="musicbrainz" if provider_url else None,
+                    source_provider=normalized_provider,
                     source_identifier=provider_url,
                 )
                 .returning(CatalogTrack.id)

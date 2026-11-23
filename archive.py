@@ -124,6 +124,7 @@ class ArchiveRepository(Protocol):
         musicbrainz_recording_id: str | None = None,
         provider_url: str | None = None,
         release_year: int | None = None,
+        source_provider: str | None = None,
     ) -> int: ...
 
 
@@ -254,6 +255,7 @@ class PersonalMusicArchive:
         owner_user_id: int,
         metadata: TrackMetadata,
         provider_url: str | None = None,
+        source_provider: str | None = None,
     ) -> int:
         return self.repository.create_metadata_only_track(
             owner_user_id,
@@ -263,4 +265,5 @@ class PersonalMusicArchive:
             metadata.musicbrainz_recording_id,
             provider_url,
             metadata.release_year,
+            source_provider,
         )

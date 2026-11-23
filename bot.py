@@ -14,8 +14,10 @@ from dotenv import load_dotenv
 from archive import PersonalMusicArchive, TelegramMessageReference, TrackMetadata
 from app.database.runtime import RuntimeDatabase
 from database import Database
-from musicbrainz import MusicBrainzError, MusicBrainzProvider, RecordingMetadata
+from metadata import MetadataProviderError, MetadataSearchProvider
+from musicbrainz import MusicBrainzError, MusicBrainzProvider
 from telegram_delivery import TelegramDeliveryService
+from youtube_music import YouTubeMusicProvider
 
 
 LOGGER = logging.getLogger("playlist_bot")
@@ -852,6 +854,7 @@ def handle_message(
     api: TelegramAPI,
     metadata_provider: MusicBrainzProvider | None = None,
     archive_chat_id: int | None = None,
+    metadata_search_provider: MetadataSearchProvider | None = None,
 ) -> None:
     chat = message.get("chat", {})
     if chat.get("type") != "private":
@@ -1430,42 +1433,26 @@ def handle_message(
         api.send_message(chat_id, "Choose a metadata match from the results above.")
         return
 
-    if metadata_provider is not None and state is None:
+    if metadata_search_provider is not None and state is None:
         try:
-            if text.startswith(("https://", "http://")):
-                matches = [metadata_provider.lookup_url(text)]
-            else:
-                title_query, separator, artist_query = text.partition(" - ")
-                matches = metadata_provider.search_recordings(
-                    title_query.strip(),
-                    artist_query.strip() if separator and artist_query.strip() else None,
-                )
-        except MusicBrainzError as error:
-            LOGGER.warning("MusicBrainz text search failed for %r: %s", text, error)
+            matches = metadata_search_provider.search(text, limit=5)
+        except MetadataProviderError as error:
+            LOGGER.warning("YouTube Music search failed for %r: %s", text, error)
             api.send_message(
                 chat_id,
                 f"Music metadata search failed: {error}. No track was added.",
             )
             return
-        if len(matches) > 1:
-            candidates = [
-                {
-                    "recording_id": match.recording_id,
-                    "title": match.title,
-                    "artist": match.artist,
-                    "release_title": match.release_title,
-                    "score": match.score,
-                    "release_year": match.release_year,
-                }
-                for match in matches[:5]
-            ]
+        if matches:
+            candidates = [match.as_dict() for match in matches[:5]]
             database.set_user_state(
                 user_id, f"metadata_results:{json.dumps(candidates, ensure_ascii=True)}"
             )
             keyboard = [
                 [
                     _button(
-                        f"{match.title} — {match.artist or 'Unknown artist'}"[:60],
+                        f"{match.title} — {match.artist or 'Unknown artist'} "
+                        f"[{match.provider}]"[:60],
                         f"metadata:{index}",
                     )
                 ]
@@ -1474,45 +1461,22 @@ def handle_message(
             keyboard.append([_button("Cancel", "home")])
             api.send_message(
                 chat_id,
-                "Several confident metadata matches were found. Choose the correct one. "
+                "Choose a metadata match from YouTube Music. "
                 "This saves metadata only; it does not create a playable Telegram reference.",
                 _markup(keyboard),
             )
             return
-        if matches:
-            match = matches[0]
-            metadata_track_id = PersonalMusicArchive(database).save_metadata_only(
-                user_id,
-                TrackMetadata(
-                    title=match.title,
-                    performer=match.artist,
-                    release_title=match.release_title,
-                    musicbrainz_recording_id=match.recording_id,
-                    release_year=match.release_year,
-                ),
-                f"https://musicbrainz.org/recording/{match.recording_id}",
-            )
-            api.send_message(
-                chat_id,
-                f"Saved metadata-only track #{metadata_track_id}: "
-                f"{match.title}"
-                + (f" — {match.artist}" if match.artist else "")
-                + ". No playable Telegram copy is available; send the audio to add a playable "
-                "track to a collection.",
-            )
-            return
         api.send_message(
             chat_id,
-            "No confident metadata match was found. You can still send a Telegram audio "
+            "No YouTube Music metadata match was found. You can still send a Telegram audio "
             "message to save a playable reference.",
         )
         return
     if state is None:
-        api.send_message(
-            chat_id,
-            "Send audio to save a playable Telegram reference, or configure "
-            "MUSICBRAINZ_CONTACT_EMAIL to search metadata by text or MusicBrainz URL.",
-        )
+        prompt = "Send audio to save a playable Telegram reference."
+        if metadata_search_provider is not None:
+            prompt += " Search for a track to save YouTube Music metadata only."
+        api.send_message(chat_id, prompt)
         return
 
     _show_home(api, chat_id, text="Use the menu buttons below to manage your playlists.")
@@ -1658,12 +1622,32 @@ def handle_callback(
                 selected = candidates[int(parts[1])]
                 if not isinstance(selected, dict):
                     raise ValueError("Invalid selection")
-                recording_id = selected["recording_id"]
+                provider = selected.get("provider")
+                identifier = selected.get("identifier")
+                if provider is None and isinstance(selected.get("recording_id"), str):
+                    provider = "musicbrainz"
+                    identifier = selected["recording_id"]
                 title = selected["title"]
                 artist = selected.get("artist")
                 release_title = selected.get("release_title")
-                if not all(isinstance(value, str) for value in (recording_id, title)):
+                provider_url = selected.get("provider_url")
+                if provider_url is None and provider == "musicbrainz":
+                    provider_url = (
+                        f"https://musicbrainz.org/recording/{identifier}"
+                    )
+                if (
+                    provider not in {"musicbrainz", "youtube_music"}
+                    or not isinstance(identifier, str)
+                    or not isinstance(title, str)
+                    or not isinstance(provider_url, str)
+                ):
                     raise ValueError("Invalid result")
+                release_year = selected.get("release_year")
+                if release_year is not None and (
+                    not isinstance(release_year, int)
+                    or isinstance(release_year, bool)
+                ):
+                    raise ValueError("Invalid release year")
             except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
                 database.clear_user_state(user_id)
                 _show_home(api, chat_id, message_id, "That metadata choice is no longer available.")
@@ -1674,10 +1658,19 @@ def handle_callback(
                         title=title,
                         performer=artist if isinstance(artist, str) else None,
                         release_title=release_title if isinstance(release_title, str) else None,
-                        musicbrainz_recording_id=recording_id,
-                        release_year=selected.get("release_year"),
+                        musicbrainz_recording_id=(
+                            selected.get("musicbrainz_recording_id")
+                            if isinstance(
+                                selected.get("musicbrainz_recording_id"), str
+                            )
+                            else identifier
+                            if provider == "musicbrainz"
+                            else None
+                        ),
+                        release_year=release_year,
                     ),
-                    f"https://musicbrainz.org/recording/{recording_id}",
+                    provider_url,
+                    source_provider=provider,
                 )
                 database.clear_user_state(user_id)
                 _edit_or_send(
@@ -1933,10 +1926,19 @@ def run() -> None:
     metadata_provider = None
     if contact_email:
         metadata_provider = MusicBrainzProvider(contact_email)
-        LOGGER.info("MusicBrainz metadata enrichment enabled")
+        LOGGER.info("MusicBrainz audio metadata enrichment enabled")
     else:
-        LOGGER.warning(
-            "MusicBrainz enrichment is disabled; set MUSICBRAINZ_CONTACT_EMAIL to enable it"
+        LOGGER.info("MusicBrainz audio metadata enrichment disabled")
+    ytmusic_enabled_value = os.environ.get("YTMUSIC_ENABLED", "true").strip().lower()
+    if ytmusic_enabled_value in {"1", "true", "yes", "on"}:
+        metadata_search_provider = YouTubeMusicProvider()
+        LOGGER.info("YouTube Music metadata search enabled")
+    elif ytmusic_enabled_value in {"0", "false", "no", "off"}:
+        metadata_search_provider = None
+        LOGGER.info("YouTube Music metadata search disabled")
+    else:
+        raise RuntimeError(
+            "YTMUSIC_ENABLED must be a boolean value (true/false, yes/no, or 1/0)."
         )
     offset: int | None = None
     LOGGER.info("Playlist bot started")
@@ -1966,6 +1968,7 @@ def run() -> None:
                             api,
                             metadata_provider,
                             archive_chat_id,
+                            metadata_search_provider,
                         )
                 except Exception:
                     LOGGER.exception("Failed to handle Telegram update %s", update["update_id"])

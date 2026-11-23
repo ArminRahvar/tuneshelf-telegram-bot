@@ -3,9 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import select
+
 from bot import TelegramAPI, TelegramAPIError, handle_callback, handle_message
 from app.database.runtime import RuntimeDatabase
+from app.database.models import CatalogTrack
 from database import Database
+from metadata import MetadataSearchResult
 from musicbrainz import MusicBrainzError, RecordingMetadata
 
 
@@ -643,19 +647,20 @@ class BotTests(unittest.TestCase):
 
     def test_metadata_query_is_saved_without_a_playable_telegram_reference(self) -> None:
         class FakeProvider:
-            def search_recordings(
-                self, title: str, artist: str | None = None
-            ) -> list[RecordingMetadata]:
-                if (title, artist) != ("Metadata Track", "Artist"):
-                    raise AssertionError("Text query was not split into title and artist.")
+            def search(self, query: str, limit: int = 5) -> list[MetadataSearchResult]:
+                if query != "Metadata Track - Artist" or limit != 5:
+                    raise AssertionError("The complete query was not passed to the provider.")
                 return [
-                    RecordingMetadata(
-                        "recording-id", "Metadata Track", "Artist", "Album", 95
+                    MetadataSearchResult(
+                        provider="youtube_music",
+                        identifier="video-id",
+                        title="Metadata Track",
+                        artist="Artist",
+                        release_title="Album",
+                        release_year=2024,
+                        provider_url="https://music.youtube.com/watch?v=video-id",
                     )
                 ]
-
-            def lookup_url(self, url: str) -> RecordingMetadata:
-                raise AssertionError("No URL was sent in this test.")
 
         handle_message(
             {
@@ -665,25 +670,62 @@ class BotTests(unittest.TestCase):
             },
             self.database,
             self.api,
-            FakeProvider(),
+            metadata_search_provider=FakeProvider(),
         )
 
+        self.assertEqual(self.database.list_metadata_only_tracks(7), [])
+        handle_callback(
+            {
+                "id": "choose-youtube-metadata",
+                "from": {"id": 7},
+                "message": {"chat": {"id": 7, "type": "private"}, "message_id": 217},
+                "data": "metadata:0",
+            },
+            self.database,
+            self.api,
+        )
         rows = self.database.list_metadata_only_tracks(7)
         self.assertEqual(rows[0]["title"], "Metadata Track")
-        self.assertIn("No playable Telegram copy", self.api.messages[-1][1])
+        self.assertIn(
+            "No playable Telegram copy",
+            self.api.calls[-1][1]["text"],
+        )
+        with self.database.library_repository.engine.connect() as connection:
+            source_provider, source_identifier = connection.execute(
+                select(
+                    CatalogTrack.source_provider,
+                    CatalogTrack.source_identifier,
+                ).where(CatalogTrack.id == rows[0]["id"])
+            ).one()
+        self.assertEqual(source_provider, "youtube_music")
+        self.assertEqual(
+            source_identifier,
+            "https://music.youtube.com/watch?v=video-id",
+        )
 
     def test_ambiguous_metadata_search_requires_user_selection(self) -> None:
         class FakeProvider:
-            def search_recordings(
-                self, title: str, artist: str | None = None
-            ) -> list[RecordingMetadata]:
+            def search(self, query: str, limit: int = 5) -> list[MetadataSearchResult]:
                 return [
-                    RecordingMetadata("first-id", "First result", "Artist", None, 97),
-                    RecordingMetadata("second-id", "Second result", "Artist", "Album", 92),
+                    MetadataSearchResult(
+                        "youtube_music",
+                        "first-id",
+                        "First result",
+                        "Artist",
+                        None,
+                        None,
+                        "https://music.youtube.com/watch?v=first-id",
+                    ),
+                    MetadataSearchResult(
+                        "youtube_music",
+                        "second-id",
+                        "Second result",
+                        "Artist",
+                        "Album",
+                        None,
+                        "https://music.youtube.com/watch?v=second-id",
+                    ),
                 ]
-
-            def lookup_url(self, url: str) -> RecordingMetadata:
-                raise AssertionError("No URL was sent in this test.")
 
         handle_message(
             {
@@ -693,7 +735,7 @@ class BotTests(unittest.TestCase):
             },
             self.database,
             self.api,
-            FakeProvider(),
+            metadata_search_provider=FakeProvider(),
         )
         keyboard = self.api.messages[-1][2]["inline_keyboard"]
         self.assertEqual(keyboard[1][0]["callback_data"], "metadata:1")
@@ -710,7 +752,7 @@ class BotTests(unittest.TestCase):
         )
         rows = self.database.list_metadata_only_tracks(7)
         self.assertEqual(rows[0]["title"], "Second result")
-        self.assertEqual(rows[0]["musicbrainz_recording_id"], "second-id")
+        self.assertIsNone(rows[0]["musicbrainz_recording_id"])
 
     def test_collection_delivery_is_limited_to_twenty_tracks(self) -> None:
         playlist_id = self.database.list_playlists(7)[0]["id"]

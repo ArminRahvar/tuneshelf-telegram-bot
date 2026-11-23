@@ -8,14 +8,16 @@ worker process.
 
 | Component | Responsibility |
 | --- | --- |
-| `bot.py` | Telegram Bot API HTTP calls, long polling, command and callback handling, menus, interaction state, MusicBrainz orchestration, and delivery retries |
+| `bot.py` | Telegram Bot API HTTP calls, long polling, command and callback handling, menus, interaction state, metadata discovery orchestration, and delivery retries |
 | `archive.py` | Telegram-independent track metadata and message-reference value objects and an application service/repository protocol for collection management, saves, annotations, collection copies, and delivery preferences |
 | `database.py` | SQLite legacy schema setup, transient bot state, and shared archive operations |
 | `postgres_database.py` | PostgreSQL legacy schema setup, transient bot state, and shared archive operations |
 | `app/database/runtime.py` | Routes runtime library workflows to the normalized repository while retaining the legacy adapter for compatibility |
 | `app/database/library_repository.py` | Owner-scoped normalized library, playlist, metadata, annotation, and source-reference operations |
 | `telegram_delivery.py` | `copyMessage` versus `forwardMessage` delivery policy |
-| `musicbrainz.py` | Synchronous MusicBrainz recording search, URL lookup, response parsing, throttling, and in-memory caching |
+| `metadata.py` | Provider-independent metadata search result and provider interfaces |
+| `youtube_music.py` | YouTube Music song search and normalized metadata results |
+| `musicbrainz.py` | Synchronous MusicBrainz recording lookup, response parsing, throttling, and in-memory caching for optional audio enrichment |
 | `app/database/models.py` | SQLAlchemy models for the normalized catalog, archive, library, playlist, and personal metadata schema |
 | `app/database/legacy_inventory.py` | Read-only legacy database inventory for migration preflight |
 | `app/database/legacy_backfill.py` | Dry-run-by-default import from a legacy SQLite/PostgreSQL database into the normalized schema |
@@ -54,10 +56,11 @@ sequentially.
   on matching artists and personal tags.
 - Multiple Telegram message references per saved track and unavailable
   reference tracking.
-- MusicBrainz search and metadata-only records; MusicBrainz is not a playable
-  music source.
+- YouTube Music text discovery with metadata-only records; provider results
+  never become playable audio. MusicBrainz is used only for optional audio
+  metadata enrichment.
 - SQLite migration tests and application tests using mocked Telegram and
-  MusicBrainz calls.
+  metadata-provider calls.
 
 ## Important current boundaries
 
@@ -70,8 +73,7 @@ sequentially.
   identifier.
 - `bot.py` and both database adapters are large modules containing multiple
   responsibilities.
-- There is no ytmusicapi provider,
-  yt-dlp/FFmpeg integration, download queue, or background worker.
+- There is no yt-dlp/FFmpeg integration, download queue, or background worker.
 
 ## Target architecture
 

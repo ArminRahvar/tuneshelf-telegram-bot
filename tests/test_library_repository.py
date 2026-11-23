@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sqlalchemy import select
+
 from archive import PersonalMusicArchive, TelegramMessageReference, TrackMetadata
+from app.database.models import CatalogTrack
 from database import Database
 
 
@@ -133,6 +136,36 @@ class LibraryRepositoryTests(unittest.TestCase):
         self.assertEqual(
             self.repository.get_track(43, second[0])["performer"], "Canonical artist"
         )
+
+    def test_metadata_provider_reference_is_reused_between_library_owners(self) -> None:
+        provider_url = "https://music.youtube.com/watch?v=video-id"
+        first_id = self.repository.create_metadata_only_track(
+            42,
+            "Provider track",
+            "Artist",
+            provider_url=provider_url,
+            source_provider="youtube_music",
+        )
+        second_id = self.repository.create_metadata_only_track(
+            43,
+            "Provider track",
+            "Artist",
+            provider_url=provider_url,
+            source_provider="youtube_music",
+        )
+
+        self.assertEqual(first_id, second_id)
+        self.assertIsNotNone(self.repository.get_track(42, first_id))
+        self.assertIsNotNone(self.repository.get_track(43, second_id))
+        with self.repository.engine.connect() as connection:
+            source_provider, source_identifier = connection.execute(
+                select(
+                    CatalogTrack.source_provider,
+                    CatalogTrack.source_identifier,
+                ).where(CatalogTrack.id == first_id)
+            ).one()
+        self.assertEqual(source_provider, "youtube_music")
+        self.assertEqual(source_identifier, provider_url)
 
 
 if __name__ == "__main__":

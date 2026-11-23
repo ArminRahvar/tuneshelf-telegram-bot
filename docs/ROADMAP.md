@@ -67,11 +67,12 @@ track rows, and current bot workflows still pass.
 
 ## Phase 4 — Music discovery
 
-- Define provider interfaces and normalized search/metadata results.
-- Integrate ytmusicapi without treating metadata search results as playable
-  archive assets.
+- Provider interfaces and normalized search/metadata results are defined.
+- YouTube Music song search uses ytmusicapi; selected results are saved as
+  metadata-only entries and are never treated as playable archive assets.
 - Evaluate MusicBrainz enrichment and matching independently from persistence.
-- Add provider tests with mocked network responses.
+- Provider normalization and bot selection are tested with mocked network
+  responses; live provider integration remains environment-dependent.
 
 ## Phase 5 — Download system
 

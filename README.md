@@ -14,14 +14,14 @@ A private-chat Telegram bot for organizing a personal music archive. Audio remai
 - Use both a persistent reply keyboard and inline keyboards for Add Music, Library, Search, Collections, Discover, Statistics, and Settings. Library track buttons open details and provide inline controls for rating, notes, tags, metadata edits, and linking another Telegram source.
 - Search the private library by title, artist, album, collection, tags, rating, release year, or playability; filter with terms such as `rating:5 year:2024 playable:true` or `metadata:true`.
 - View per-user library statistics and recommendations based only on matching artists and manually assigned tags.
-- Search MusicBrainz by text and supported MusicBrainz recording URLs. Select between multiple confident matches. Provider-only matches are stored as metadata-only tracks and are clearly not playable until an audio message is saved.
+- Search YouTube Music by text. Results are always selected explicitly and saved as metadata-only tracks; they never create a playable Telegram reference. Set `YTMUSIC_ENABLED=false` to disable external search.
 - Use an application/domain service in `archive.py` that does not depend on Telegram handlers. Persistence is available through the local SQLite adapter and the PostgreSQL adapter.
 
 The bot ignores chats other than private chats. `/start` and `/help` open the main menu. Track IDs are shown in the library and collections. Most common workflows are available through reply and inline buttons; commands remain available for direct use and compatibility.
 
 ## Run locally
 
-Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set. The bot loads variables from a local `.env` file when present; environment variables already set by the shell take precedence. Install the requirements to run the bot and tests:
+Python 3.10 or newer is required. SQLite is used when `DATABASE_URL` is not set. The bot loads variables from a local `.env` file when present; environment variables already set by the shell take precedence. YouTube Music text search is enabled by default and can be disabled with `YTMUSIC_ENABLED=false`. Install the requirements to run the bot and tests:
 
 ```sh
 cp .env.example .env
@@ -98,13 +98,13 @@ transaction and any conflict rolls back the full import. The dry-run validates
 the source and target schema without writing either database; target data
 conflicts are surfaced during apply and rolled back.
 
-MusicBrainz enrichment/search is optional. Configure a contact email for its User-Agent:
+MusicBrainz audio metadata enrichment is optional. Configure a contact email for its User-Agent:
 
 ```sh
 export MUSICBRAINZ_CONTACT_EMAIL='you@example.com'
 ```
 
-When enabled, sending a text query or a `musicbrainz.org/recording/<MBID>` URL searches/saves metadata. The MusicBrainz integration uses a descriptive User-Agent, spaces requests, and requires a confident match. It does not provide playable audio.
+When enabled, MusicBrainz may enrich metadata on a newly submitted audio message. Text discovery uses YouTube Music and is enabled by default; set `YTMUSIC_ENABLED=false` to turn it off. Search queries are sent to YouTube Music, and selected results are stored as metadata only. They are never treated as playable audio.
 
 ## Telegram commands
 
@@ -156,11 +156,11 @@ target model, and [docs/ROADMAP.md](docs/ROADMAP.md) for staged development.
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover migrations, collection ownership, multiple/unavailable source references, metadata-only entries, ratings/notes/tags, MusicBrainz matching and URL validation, Telegram delivery policy, callback flows, and bounded collection playback. A shared repository contract runs against SQLite locally and against PostgreSQL in CI. Telegram and MusicBrainz network calls are mocked.
+Tests cover migrations, collection ownership, multiple/unavailable source references, metadata-only entries, ratings/notes/tags, MusicBrainz matching, YouTube Music result normalization, Telegram delivery policy, callback flows, and bounded collection playback. A shared repository contract runs against SQLite locally and against PostgreSQL in CI. Telegram and metadata-provider network calls are mocked.
 
 ## Limitations
 
-- Metadata-only tracks are not playable. If the user later sends the audio, that creates a separate playable library track. MusicBrainz is the only external metadata provider currently supported.
+- Metadata-only tracks are not playable. If the user later sends the audio, that creates a separate playable library track. YouTube Music is used for text discovery; MusicBrainz is used only for optional audio metadata enrichment.
 - Collection playback is sequential (or shuffled) and capped at 20 tracks per request; it is not a streaming queue.
 - Message references can become unusable when the source message is deleted, inaccessible, or otherwise restricted by Telegram. The bot reports retrieval failures and retains track metadata so another source message can be linked.
 - Group chats are intentionally ignored.
