@@ -36,8 +36,14 @@ def backfill_legacy_library(database_url: str) -> None:
             ).first() is not None:
                 return
             tables = set(inspect(connection).get_table_names())
-            track_count = int(
-                connection.execute(text("SELECT COUNT(*) FROM tracks")).scalar_one()
+            track_count = (
+                int(
+                    connection.execute(
+                        text("SELECT COUNT(*) FROM tracks")
+                    ).scalar_one()
+                )
+                if "tracks" in tables
+                else 0
             )
             metadata_count = (
                 int(

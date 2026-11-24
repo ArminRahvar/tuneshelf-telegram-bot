@@ -75,13 +75,20 @@ track rows, and current bot workflows still pass.
   responses; live provider integration remains environment-dependent.
 
 ## Phase 5 — Download system
-
-- Add a PostgreSQL-backed job and batch model with explicit lifecycle states.
-- Integrate yt-dlp and FFmpeg behind downloader/processor interfaces.
-- Process authorized content in background workers; do not block Telegram
-  update handling.
-- Add retry, cancellation, duplicate-job prevention, progress reporting, and
-  archive/library registration tests.
+- Additive `download_jobs` migration and normalized SQLAlchemy model provide
+  PostgreSQL/SQLite job and batch persistence with explicit lifecycle states.
+- SQLite/PostgreSQL repository operations support enqueue, batch enqueue,
+  duplicate-active-job prevention, status/progress updates, claiming,
+  cancellation, and retry.
+- yt-dlp and FFmpeg adapters are isolated behind downloader/processor
+  protocols and the synchronous download service processes one job at a time
+  while reporting lifecycle and progress.
+- Repository lifecycle and fresh-database migration tests are in place.
+- A daemon download worker now runs beside Telegram polling and processes jobs
+  outside the update loop; bot/menu controls support queue, status, cancel,
+  and retry.
+- Remaining: wire Telegram archive/library registration,
+  registration, and bot status/cancellation controls.
 
 ## Phase 6 — Deployment and reliability
 

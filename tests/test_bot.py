@@ -45,6 +45,106 @@ class BotTests(unittest.TestCase):
         self.database.library_repository.close()
         self.directory.cleanup()
 
+    def test_search_select_downloads_and_queues_youtube_result(self) -> None:
+        class FakeSearchProvider:
+            def search(self, query: str, limit: int = 5) -> list[MetadataSearchResult]:
+                self.query = query
+                self.limit = limit
+                return [
+                    MetadataSearchResult(
+                        provider="youtube_music",
+                        identifier="video-id",
+                        title="Track",
+                        artist="Artist",
+                        release_title=None,
+                        release_year=2024,
+                        provider_url="https://music.youtube.com/watch?v=video-id",
+                    )
+                ]
+
+        provider = FakeSearchProvider()
+        handle_message(
+            {
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 7},
+                "text": "🔎 Search",
+            },
+            self.database,
+            self.api,
+            metadata_search_provider=provider,
+        )
+        handle_message(
+            {
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 7},
+                "text": "Track Artist",
+            },
+            self.database,
+            self.api,
+            metadata_search_provider=provider,
+        )
+
+        self.assertEqual(provider.query, "Track Artist")
+        self.assertEqual(provider.limit, 5)
+        self.assertTrue(
+            self.database.get_user_state(7).startswith("download_search_results:")
+        )
+
+        handle_callback(
+            {
+                "id": "callback-download-search",
+                "from": {"id": 7},
+                "message": {
+                    "chat": {"id": 7, "type": "private"},
+                    "message_id": 221,
+                },
+                "data": "download_search:0",
+            },
+            self.database,
+            self.api,
+        )
+
+        jobs = self.database.download_repository.list_for_user(7)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            jobs[0]["source_url"],
+            "https://music.youtube.com/watch?v=video-id",
+        )
+        self.assertIsNotNone(jobs[0]["track_id"])
+        self.assertIsNone(self.database.get_user_state(7))
+
+    def test_download_button_prompts_for_url_and_queues_job(self) -> None:
+        handle_callback(
+            {
+                "id": "callback-download-add",
+                "from": {"id": 7},
+                "message": {
+                    "chat": {"id": 7, "type": "private"},
+                    "message_id": 220,
+                },
+                "data": "download_add",
+            },
+            self.database,
+            self.api,
+        )
+        self.assertEqual(self.database.get_user_state(7), "download_url")
+
+        handle_message(
+            {
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 7},
+                "text": "https://example.com/audio",
+            },
+            self.database,
+            self.api,
+        )
+
+        jobs = self.database.download_repository.list_for_user(7)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["source_url"], "https://example.com/audio")
+        self.assertEqual(jobs[0]["status"], "pending")
+        self.assertIsNone(self.database.get_user_state(7))
+
     def test_inline_menu_add_and_play_use_original_message_reference(self) -> None:
         handle_message(
             {

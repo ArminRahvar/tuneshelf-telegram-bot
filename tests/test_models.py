@@ -57,8 +57,9 @@ class ModelMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-        self.assertEqual(revision, "1f05b6c23d8a")
+        self.assertEqual(revision, "a7c3e2f1d4b6")
         self.assertIn("archive_assets", tables)
+        self.assertIn("download_jobs", tables)
 
     def test_startup_imports_legacy_archive_assets(self) -> None:
         legacy_database = Database.__new__(Database)

@@ -15,6 +15,14 @@ A private-chat Telegram bot for organizing a personal music archive. Audio remai
 - Search the private library by title, artist, album, collection, tags, rating, release year, or playability; filter with terms such as `rating:5 year:2024 playable:true` or `metadata:true`.
 - View per-user library statistics and recommendations based only on matching artists and manually assigned tags.
 - Search YouTube Music by text. Results are always selected explicitly and saved as metadata-only tracks; they never create a playable Telegram reference. Set `YTMUSIC_ENABLED=false` to disable external search.
+- Queue downloads from HTTP(S) URLs with `/download <url>`, `/downloads`,
+  `/cancel_download <job-id>`, and `/retry_download <job-id>`. A daemon worker
+  in the bot process executes yt-dlp and FFmpeg outside the Telegram update
+  loop.
+- Queue download jobs with retry, cancellation, duplicate prevention, progress,
+  batch IDs, and lifecycle persistence. yt-dlp and FFmpeg adapters are
+  available behind application protocols; a persistent worker process and
+  Telegram archive upload wiring remain deployment work.
 - Use an application/domain service in `archive.py` that does not depend on Telegram handlers. Persistence is available through the local SQLite adapter and the PostgreSQL adapter.
 
 The bot ignores chats other than private chats. `/start` and `/help` open the main menu. Track IDs are shown in the library and collections. Most common workflows are available through reply and inline buttons; commands remain available for direct use and compatibility.
@@ -118,6 +126,10 @@ When enabled, MusicBrainz may enrich metadata on a newly submitted audio message
 - `/collections` — list collection IDs and contents counts.
 - `/addtrack <track-id> <collection-id>` — add an existing track and its source references to another collection.
 - `/metadata` and `/deletemetadata <id>` — list/remove metadata-only search results.
+- `/download <url>` — queue an authorized HTTP(S) audio download.
+- `/downloads` — list download jobs and their status.
+- `/cancel_download <job-id>` — cancel an active download job.
+- `/retry_download <job-id>` — retry a failed or cancelled job.
 
 ## Container deployment
 

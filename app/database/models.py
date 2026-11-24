@@ -493,6 +493,73 @@ class UserPreference(Base):
     delivery_mode: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
+class DownloadJob(Base):
+    __tablename__ = "download_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'converting', 'uploading', "
+            "'completed', 'failed', 'cancelled')",
+            name="ck_download_jobs_status",
+        ),
+        CheckConstraint(
+            "progress BETWEEN 0 AND 100",
+            name="ck_download_jobs_progress",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_download_jobs_attempt_count",
+        ),
+        Index("ix_download_jobs_status_created", "status", "created_at"),
+        Index("ix_download_jobs_user_status", "user_id", "status"),
+        Index("ix_download_jobs_batch", "batch_id"),
+    )
+
+    id: Mapped[int] = mapped_column(ID_TYPE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ID_TYPE,
+        ForeignKey("users.telegram_user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    track_id: Mapped[int | None] = mapped_column(
+        ID_TYPE,
+        ForeignKey("catalog_tracks.id", ondelete="SET NULL"),
+    )
+    batch_id: Mapped[str | None] = mapped_column(String(64))
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    progress: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+
 class LegacyImportMap(Base):
     __tablename__ = "legacy_import_maps"
     __table_args__ = (

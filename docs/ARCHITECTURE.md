@@ -21,6 +21,9 @@ worker process.
 | `app/database/models.py` | SQLAlchemy models for the normalized catalog, archive, library, playlist, and personal metadata schema |
 | `app/database/legacy_inventory.py` | Read-only legacy database inventory for migration preflight |
 | `app/database/legacy_backfill.py` | Dry-run-by-default import from a legacy SQLite/PostgreSQL database into the normalized schema |
+| `app/database/download_repository.py` | Owner-scoped download job enqueue, lifecycle, retry, cancellation, and batch persistence |
+| `app/services/download_service.py` | Coordinates queued download processing and conversion without Telegram handlers |
+| `app/integrations/downloader.py` | yt-dlp/FFmpeg downloader and processor adapters behind protocols |
 | `migrations/` | Additive Alembic migrations applied at startup after legacy schema setup |
 
 `archive.py` coordinates collection and library operations through the
@@ -73,7 +76,8 @@ sequentially.
   identifier.
 - `bot.py` and both database adapters are large modules containing multiple
   responsibilities.
-- There is no yt-dlp/FFmpeg integration, download queue, or background worker.
+- The download queue and yt-dlp/FFmpeg adapters exist, but there is no persistent
+  worker process or Telegram archive/upload registration yet.
 
 ## Target architecture
 

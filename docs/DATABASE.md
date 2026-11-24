@@ -56,7 +56,8 @@ Telegram storage:
 - `library_entries` for a user's ownership/membership of a catalog track
 - `user_track_tags`, `user_track_notes`, and `user_track_ratings`
 - `user_playlists` and `playlist_items`
-- `download_jobs` in the later download phase
+- `download_jobs` for queued, cancellable, retryable download lifecycle and batch
+  processing
 
 Key invariants:
 

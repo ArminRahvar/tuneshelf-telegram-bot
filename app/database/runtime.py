@@ -7,6 +7,12 @@ class RuntimeDatabase:
     def __init__(self, legacy_adapter: Any) -> None:
         self.legacy_adapter = legacy_adapter
         self.library_repository = legacy_adapter.library_repository
+        from app.database.download_repository import DownloadRepository
+
+        self.download_repository = DownloadRepository(
+            "",
+            engine=self.library_repository.engine,
+        )
 
     def create_playlist(self, user_id: int, name: str) -> bool:
         return self.library_repository.create_playlist(user_id, name)

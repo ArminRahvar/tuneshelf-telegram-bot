@@ -3,10 +3,13 @@ import logging
 import os
 import random
 import re
+import threading
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -18,6 +21,8 @@ from metadata import MetadataProviderError, MetadataSearchProvider
 from musicbrainz import MusicBrainzError, MusicBrainzProvider
 from telegram_delivery import TelegramDeliveryService
 from youtube_music import YouTubeMusicProvider
+from app.integrations.downloader import FFmpegProcessor, YtDlpDownloader
+from app.services.download_service import DownloadService
 
 
 LOGGER = logging.getLogger("playlist_bot")
@@ -85,6 +90,64 @@ class TelegramAPI:
     ) -> None:
         self.call("sendMessage", chat_id=chat_id, text=text, reply_markup=reply_markup)
 
+    def send_audio(
+        self,
+        chat_id: int,
+        file_path: Path,
+        title: str,
+        performer: str | None = None,
+    ) -> dict[str, Any]:
+        url = API_BASE.format(token=self.token, method="sendAudio")
+        boundary = f"tuneshelf-{uuid.uuid4().hex}"
+        fields: list[tuple[str, str]] = [
+            ("chat_id", str(chat_id)),
+            ("title", title),
+        ]
+        if performer:
+            fields.append(("performer", performer))
+
+        body = bytearray()
+        for name, value in fields:
+            body.extend(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode()
+            )
+        body.extend(
+            (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="audio"; '
+                f'filename="{file_path.name}"\r\n'
+                "Content-Type: audio/mpeg\r\n\r\n"
+            ).encode()
+        )
+        body.extend(file_path.read_bytes())
+        body.extend(f"\r\n--{boundary}--\r\n".encode())
+
+        request = Request(
+            url,
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                result = json.loads(response.read())
+        except (HTTPError, URLError, TimeoutError) as error:
+            raise TelegramAPIError(str(error)) from error
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise TelegramAPIError("Telegram returned an invalid JSON response") from error
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise TelegramAPIError(
+                result.get("description", "Telegram API request failed")
+                if isinstance(result, dict)
+                else "Telegram API request failed"
+            )
+        if not isinstance(result.get("result"), dict):
+            raise TelegramAPIError("Telegram returned an invalid sendAudio response")
+        return result["result"]
+
 
 def _button(text: str, callback_data: str) -> dict[str, str]:
     return {"text": text, "callback_data": callback_data}
@@ -100,7 +163,7 @@ def _reply_menu_markup() -> dict[str, Any]:
             [{"text": "➕ Add Music"}, {"text": "📚 My Library"}],
             [{"text": "🔎 Search"}, {"text": "🗂 Collections"}],
             [{"text": "✨ Discover"}, {"text": "📊 Statistics"}],
-            [{"text": "⚙️ Settings"}],
+            [{"text": "⬇️ Downloads"}, {"text": "⚙️ Settings"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -132,6 +195,7 @@ def _home_keyboard() -> list[list[dict[str, str]]]:
         [_button("➕ Add Music", "add_music"), _button("📚 My Library", "library")],
         [_button("🔎 Search", "search"), _button("🗂 Collections", "playlists")],
         [_button("✨ Discover", "discover"), _button("📊 Statistics", "stats")],
+        [_button("⬇️ Downloads", "downloads")],
         [_button("⚙️ Settings", "settings")],
         [_button("➕ Create collection", "new")],
     ]
@@ -340,6 +404,43 @@ def _show_settings(
         ],
         message_id,
     )
+
+
+def _show_downloads(
+    user_id: int,
+    chat_id: int,
+    database: Database,
+    api: TelegramAPI,
+    message_id: int | None,
+) -> None:
+    jobs = database.download_repository.list_for_user(user_id)
+    if not jobs:
+        text = "⬇️ Downloads\n\nNo download jobs yet."
+    else:
+        lines = ["⬇️ Downloads"]
+        for job in jobs[:10]:
+            source = str(job["source_url"])
+            if len(source) > 48:
+                source = source[:45] + "..."
+            lines.append(
+                f"#{job['id']} · {job['status']} · {job['progress']}% · {source}"
+            )
+        text = "\n".join(lines)
+
+    keyboard: list[list[dict[str, str]]] = []
+    for job in jobs[:10]:
+        job_id = int(job["id"])
+        if job["status"] in {"failed", "cancelled"}:
+            keyboard.append([
+                _button("🔄 Retry", f"download_retry:{job_id}")
+            ])
+        elif job["status"] in {"pending", "processing", "converting", "uploading"}:
+            keyboard.append([
+                _button("❌ Cancel", f"download_cancel:{job_id}")
+            ])
+    keyboard.append([_button("➕ Add download URL", "download_add")])
+    keyboard.append([_button("⬅️ Main menu", "home")])
+    _edit_or_send(api, chat_id, text, keyboard, message_id)
 
 
 def _clear_interaction_state(database: Database, user_id: int) -> None:
@@ -916,6 +1017,56 @@ def handle_message(
     if text == "⚙️ Settings":
         _show_settings(user_id, chat_id, database, api, None)
         return
+    if text == "⬇️ Downloads":
+        _show_downloads(user_id, chat_id, database, api, None)
+        return
+    if text.startswith(("http://", "https://")):
+        parsed = urlparse(text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            job_id = database.download_repository.enqueue(user_id, text)
+            database.clear_user_state(user_id)
+            api.send_message(
+                chat_id,
+                f"Download queued as job #{job_id}."
+                if job_id is not None
+                else "This URL already has an active download job.",
+            )
+            return
+    if command == "/download":
+        source_url = command_args.strip()
+        parsed = urlparse(source_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            api.send_message(chat_id, "Usage: /download <http-or-https-url>")
+            return
+        job_id = database.download_repository.enqueue(user_id, source_url)
+        api.send_message(
+            chat_id,
+            f"Download queued as job #{job_id}."
+            if job_id is not None
+            else "This URL already has an active download job.",
+        )
+        return
+    if command == "/downloads":
+        _show_downloads(user_id, chat_id, database, api, None)
+        return
+    if command in {"/cancel_download", "/retry_download"}:
+        try:
+            job_id = int(command_args)
+        except ValueError:
+            api.send_message(chat_id, f"Usage: {command} <job-id>")
+            return
+        changed = (
+            database.download_repository.cancel(user_id, job_id)
+            if command == "/cancel_download"
+            else database.download_repository.retry(user_id, job_id)
+        )
+        api.send_message(
+            chat_id,
+            "Job cancelled." if command == "/cancel_download" and changed
+            else "Job queued for retry." if changed
+            else "No matching job could be updated.",
+        )
+        return
     if command == "/link":
         try:
             track_id = int(command_args)
@@ -1387,6 +1538,21 @@ def handle_message(
             else:
                 api.send_message(chat_id, "That track could not be updated.")
             return
+    if state == "download_url":
+        parsed = urlparse(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            api.send_message(chat_id, "Send a valid HTTP(S) URL.")
+            return
+        job_id = database.download_repository.enqueue(user_id, text)
+        database.clear_user_state(user_id)
+        api.send_message(
+            chat_id,
+            f"Download queued as job #{job_id}."
+            if job_id is not None
+            else "This URL already has an active download job.",
+            _markup([[_button("⬇️ Downloads", "downloads")]]),
+        )
+        return
     if state is not None and state.startswith("link:"):
         api.send_message(chat_id, "Send an audio or audio document to associate it.")
         return
@@ -1395,6 +1561,36 @@ def handle_message(
         if not query or len(query) > 100:
             api.send_message(chat_id, "Search text must contain 1–100 characters. Try again.")
             return
+        if metadata_search_provider is not None:
+            try:
+                matches = metadata_search_provider.search(query, limit=5)
+            except MetadataProviderError as error:
+                LOGGER.warning("YouTube Music search failed for %r: %s", query, error)
+                api.send_message(chat_id, f"Music search failed: {error}")
+                return
+            if matches:
+                candidates = [match.as_dict() for match in matches[:5]]
+                database.set_user_state(
+                    user_id,
+                    f"download_search_results:{json.dumps(candidates, ensure_ascii=True)}",
+                )
+                keyboard = [
+                    [
+                        _button(
+                            f"{match.title} — {match.artist or 'Unknown artist'}"[:60],
+                            f"download_search:{index}",
+                        )
+                    ]
+                    for index, match in enumerate(matches[:5])
+                ]
+                keyboard.append([_button("Search library instead", "search_library")])
+                keyboard.append([_button("Cancel", "home")])
+                api.send_message(
+                    chat_id,
+                    "نتیجه‌ها را انتخاب کنید تا دانلود و ارسال فایل آغاز شود:",
+                    _markup(keyboard),
+                )
+                return
         database.set_user_state(user_id, f"search_results:{query}")
         _show_search_results(user_id, chat_id, query, 0, database, api, None)
         return
@@ -1564,6 +1760,23 @@ def handle_callback(
         _show_statistics(user_id, chat_id, database, api, message_id)
     elif action == "settings":
         _show_settings(user_id, chat_id, database, api, message_id)
+    elif action == "downloads":
+        _show_downloads(user_id, chat_id, database, api, message_id)
+    elif action == "download_add":
+        database.set_user_state(user_id, "download_url")
+        _edit_or_send(
+            api,
+            chat_id,
+            "Send an HTTP(S) URL to queue for download.",
+            [[_button("⬅️ Downloads", "downloads")]],
+            message_id,
+        )
+    elif action == "download_cancel" and len(parts) == 2:
+        database.download_repository.cancel(user_id, int(parts[1]))
+        _show_downloads(user_id, chat_id, database, api, message_id)
+    elif action == "download_retry" and len(parts) == 2:
+        database.download_repository.retry(user_id, int(parts[1]))
+        _show_downloads(user_id, chat_id, database, api, message_id)
     elif action == "delivery" and len(parts) == 2 and parts[1] in {"copy", "forward"}:
         PersonalMusicArchive(database).set_delivery_mode(user_id, parts[1])
         _show_settings(user_id, chat_id, database, api, message_id)
@@ -1692,10 +1905,86 @@ def handle_callback(
         _edit_or_send(
             api,
             chat_id,
-            "Send a track title, artist, or playlist name to search your library.",
+            "نام آهنگ یا آرتیست را بنویسید تا نتایج جستجو نمایش داده شود.",
             [[_button("Cancel", "home")]],
             message_id,
         )
+    elif action == "search_library":
+        state = database.get_user_state(user_id)
+        query = ""
+        if state and state.startswith("download_search_results:"):
+            previous = state.split(":", maxsplit=1)[1]
+            if previous:
+                # The external search has no original query in its state. Ask for a
+                # library query rather than reusing provider JSON.
+                query = ""
+        database.set_user_state(user_id, "search")
+        _edit_or_send(
+            api,
+            chat_id,
+            "برای جستجو در کتابخانه خود، نام آهنگ، آرتیست یا پلی‌لیست را بنویسید.",
+            [[_button("Cancel", "home")]],
+            message_id,
+        )
+    elif action == "download_search" and len(parts) == 2:
+        state = database.get_user_state(user_id)
+        if state is None or not state.startswith("download_search_results:"):
+            _show_home(api, chat_id, message_id, "نتیجه‌های جستجو منقضی شده‌اند.")
+        else:
+            try:
+                candidates = json.loads(state.split(":", maxsplit=1)[1])
+                selected = candidates[int(parts[1])]
+                if not isinstance(selected, dict):
+                    raise ValueError("Invalid result")
+                title = selected["title"]
+                artist = selected.get("artist")
+                provider_url = selected["provider_url"]
+                if not isinstance(title, str) or not isinstance(provider_url, str):
+                    raise ValueError("Invalid result")
+                release_title = selected.get("release_title")
+                release_year = selected.get("release_year")
+                if release_year is not None and (
+                    not isinstance(release_year, int)
+                    or isinstance(release_year, bool)
+                ):
+                    raise ValueError("Invalid release year")
+            except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                database.clear_user_state(user_id)
+                _show_home(api, chat_id, message_id, "گزینه انتخابی معتبر نیست.")
+            else:
+                track_id = PersonalMusicArchive(database).save_metadata_only(
+                    user_id,
+                    TrackMetadata(
+                        title=title,
+                        performer=artist if isinstance(artist, str) else None,
+                        release_title=(
+                            release_title if isinstance(release_title, str) else None
+                        ),
+                        release_year=release_year,
+                    ),
+                    provider_url,
+                    source_provider="youtube_music",
+                )
+                job_id = database.download_repository.enqueue(
+                    user_id,
+                    provider_url,
+                    track_id=track_id,
+                )
+                database.clear_user_state(user_id)
+                text = (
+                    f"دانلود «{title}» در صف قرار گرفت"
+                    + (f" (کار #{job_id})" if job_id is not None else "")
+                    + "."
+                )
+                if job_id is None:
+                    text = "این آهنگ قبلاً در صف دانلود یا در حال پردازش است."
+                _edit_or_send(
+                    api,
+                    chat_id,
+                    text,
+                    [[_button("⬇️ Downloads", "downloads")], [_button("⬅️ Main menu", "home")]],
+                    message_id,
+                )
     elif action == "search_page" and len(parts) == 2:
         state = database.get_user_state(user_id)
         if state is None or not state.startswith("search_results:"):
@@ -1896,6 +2185,54 @@ def handle_callback(
         _show_home(api, chat_id, message_id, "That menu action is no longer available.")
 
 
+def _start_download_worker(database: Database, api: TelegramAPI) -> threading.Thread:
+    service = DownloadService(
+        database.download_repository,
+        YtDlpDownloader(),
+        FFmpegProcessor(),
+    )
+
+    def consume_audio(converted: Path, job: dict[str, Any]) -> None:
+        track_id = job.get("track_id")
+        track = (
+            database.library_repository.get_track(
+                int(job["user_id"]),
+                int(track_id),
+            )
+            if track_id is not None
+            else None
+        )
+        title = str(track["title"]) if track else converted.stem
+        performer = (
+            str(track["performer"])
+            if track and track.get("performer")
+            else None
+        )
+        api.send_audio(
+            int(job["user_id"]),
+            converted,
+            title,
+            performer,
+        )
+
+    def worker_loop() -> None:
+        LOGGER.info("Download worker started")
+        while True:
+            try:
+                service.process_next(consume_audio)
+            except Exception:
+                LOGGER.exception("Unexpected download worker failure")
+            time.sleep(5)
+
+    worker = threading.Thread(
+        target=worker_loop,
+        name="tuneshelf-download-worker",
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
 def run() -> None:
     load_dotenv()
     token = os.environ.get("BOT_TOKEN")
@@ -1918,6 +2255,7 @@ def run() -> None:
         )
         LOGGER.info("Using SQLite archive database")
     api = TelegramAPI(token)
+    _start_download_worker(database, api)
     if archive_chat_id is None:
         LOGGER.info("Shared Telegram archive disabled")
     else:
